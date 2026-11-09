@@ -202,6 +202,155 @@ class AuthTests(ReceiverTestCase):
         self.assertEqual(self.request("GET", "/ping")[0], 429)
 
 
+class AddressClassifierTests(unittest.TestCase):
+    def test_same_network_addresses_are_allowed(self):
+        for ip, scope in [
+            ("127.0.0.1", "loopback"), ("127.8.9.10", "loopback"), ("::1", "loopback"),
+            ("10.0.0.1", "private"), ("10.255.255.255", "private"),
+            ("172.16.0.1", "private"), ("172.31.255.254", "private"), ("172.20.10.2", "private"),  # Personal Hotspot
+            ("192.168.0.10", "private"), ("192.168.255.1", "private"),
+            ("169.254.3.4", "linkLocal"), ("fe80::1", "linkLocal"), ("fe80::aede:48ff:fe00:1122%en5", "linkLocal"),
+            ("[fe80::1]", "linkLocal"), ("fd12:3456:789a::1", "uniqueLocal"), ("fc00::1", "uniqueLocal"),
+            ("::ffff:192.168.1.5", "private"), ("::ffff:127.0.0.1", "loopback"), ("::ffff:169.254.1.1", "linkLocal"),
+        ]:
+            with self.subTest(ip=ip):
+                self.assertEqual(mr.address_scope(ip), scope)
+                self.assertTrue(mr.is_local_address(ip))
+
+    def test_other_addresses_are_refused(self):
+        for ip in [
+            # addresses from the real run log (scanner, iPhone over the internet, the Mac's public addresses)
+            "192.0.2.88", "203.0.113.45", "198.51.100.23", "198.51.100.77",
+            "8.8.8.8", "11.0.0.1", "172.15.255.255", "172.32.0.1", "192.169.0.1", "169.255.0.1",
+            "100.64.0.1", "100.127.255.254",  # carrier-grade NAT: shared with other customers, not this LAN
+            "0.0.0.0", "255.255.255.255", "224.0.0.251",
+            "2001:db8::1", "2400:4050::1", "fec0::1", "::", "ff02::fb", "::ffff:8.8.8.8",
+        ]:
+            with self.subTest(ip=ip):
+                self.assertEqual(mr.address_scope(ip), "public")
+                self.assertFalse(mr.is_local_address(ip))
+
+    def test_non_addresses_are_refused(self):
+        for value in ["", "mac.local", "localhost", "1.2.3", "300.1.1.1", None, 12]:
+            with self.subTest(value=value):
+                self.assertIsNone(mr.address_scope(value))
+                self.assertFalse(mr.is_local_address(value))
+
+    def test_connect_urls_only_offer_same_network_addresses(self):
+        urls, warnings = mr.connect_urls(["192.168.1.20", "198.51.100.23", "169.254.7.8"], 8765)
+        self.assertEqual(urls[0], "http://192.168.1.20:8765")
+        self.assertTrue(urls[1].startswith("http://169.254.7.8:8765"))
+        self.assertEqual(len(urls), 2)
+        self.assertEqual(warnings, [])
+
+    def test_connect_urls_warn_when_only_public_addresses(self):
+        # The real run: a public address plus a link-local one, no private LAN address.
+        urls, warnings = mr.connect_urls(["198.51.100.23", "169.254.7.8"], 8765)
+        self.assertEqual(len(urls), 1)
+        self.assertTrue(urls[0].startswith("http://169.254.7.8:8765"))
+        self.assertNotIn("198.51.100.23:8765", " ".join(urls))
+        text = "\n".join(warnings)
+        self.assertIn("198.51.100.23", text)
+        self.assertIn("USB ケーブル", text)
+        self.assertIn("インターネット共有", text)
+        self.assertIn("受け付けません", text)
+        urls, warnings = mr.connect_urls(["198.51.100.77"], 8765)
+        self.assertNotIn("http://198.51.100.77:8765", urls)
+        self.assertTrue(warnings)
+
+    def test_connect_urls_with_allow_remote_list_public_and_warn(self):
+        urls, warnings = mr.connect_urls(["198.51.100.23"], 8765, allow_remote=True)
+        self.assertTrue(urls[0].startswith("http://198.51.100.23:8765"))
+        self.assertIn("暗号化", "\n".join(warnings))
+
+    def test_connect_urls_keep_a_host_name(self):
+        self.assertEqual(mr.connect_urls(["mac.local"], 8765), (["http://mac.local:8765"], []))
+
+
+class RemoteAddressTests(ReceiverTestCase):
+    """Requests from outside this network are closed without reading or answering anything."""
+
+    def handle_as(self, client_ip, raw, server=None):
+        """Run one RequestHandler on a socketpair as if the connection came from `client_ip`."""
+        ours, theirs = socket.socketpair()
+        try:
+            theirs.sendall(raw)
+            with redirect_stdout(self.out):
+                mr.RequestHandler(ours, (client_ip, 40000), server or self.server)
+            ours.close()
+            theirs.settimeout(5)
+            data = b""
+            while True:
+                chunk = theirs.recv(65536)
+                if not chunk:
+                    return data
+                data += chunk
+        finally:
+            ours.close()
+            theirs.close()
+
+    def ping_request(self, body=b""):
+        head = ("GET /api/v1/ping HTTP/1.1\r\nHost: x\r\nX-Memoria-Token: 123456\r\nConnection: close\r\n"
+                "Content-Length: %d\r\n\r\n" % len(body)).encode("ascii")
+        return head + body
+
+    def test_allowed_addresses_are_served(self):
+        for ip in ("192.168.1.20", "172.20.10.2", "10.1.2.3", "169.254.7.8", "fe80::1%en0", "::ffff:192.168.1.20"):
+            with self.subTest(ip=ip):
+                data = self.handle_as(ip, self.ping_request())
+                self.assertTrue(data.startswith(b"HTTP/1.1 200"), data[:80])
+                self.assertIn(b'"service": "memoria-capture-receiver"', data)
+
+    def test_public_addresses_get_no_reply(self):
+        for ip in ("192.0.2.88", "203.0.113.45", "100.64.0.1", "2001:db8::1", "::ffff:8.8.8.8"):
+            with self.subTest(ip=ip):
+                self.assertEqual(self.handle_as(ip, b"GET / HTTP/1.1\r\nHost: x\r\n\r\n"), b"")
+                self.assertEqual(self.handle_as(ip, self.ping_request()), b"")
+                self.assertIn("[拒否] 外部アドレス %s" % ip, self.out.getvalue())
+        log = self.out.getvalue()
+        self.assertNotIn("/api/v1/ping ->", log)
+        self.assertNotIn("GET / ->", log)
+
+    def test_public_upload_body_is_never_read(self):
+        cap = Capture()
+        body = json.dumps(cap.manifest()).encode("utf-8")
+        raw = ("POST /api/v1/sessions/%s/uploads HTTP/1.1\r\nHost: x\r\nX-Memoria-Token: 123456\r\n"
+               "Content-Type: application/json\r\nContent-Length: %d\r\n\r\n" % (cap.sid, len(body))).encode("ascii") + body
+        self.assertEqual(self.handle_as("203.0.113.45", raw), b"")
+        self.assertEqual(list((self.data_dir / "incoming").glob("*/*")), [])
+
+    def test_verify_request_closes_before_reading(self):
+        with redirect_stdout(self.out):
+            self.assertTrue(self.server.verify_request(None, ("192.168.0.5", 1)))
+            self.assertTrue(self.server.verify_request(None, ("127.0.0.1", 1)))
+            self.assertFalse(self.server.verify_request(None, ("192.0.2.88", 1)))
+            self.assertFalse(self.server.verify_request(None, ("::ffff:192.0.2.88", 1)))
+
+    def test_refused_log_is_one_line_per_address_per_interval(self):
+        with redirect_stdout(self.out):
+            for _ in range(5):
+                self.server.verify_request(None, ("203.0.113.9", 1))
+        lines = [l for l in self.out.getvalue().splitlines() if "203.0.113.9" in l]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("[拒否] 外部アドレス 203.0.113.9", lines[0])
+        self.assertNotIn("123456", self.out.getvalue())
+
+    def test_allow_remote_opts_in(self):
+        server = mr.ReceiverServer(("127.0.0.1", 0), self.receiver, allow_remote=True)
+        try:
+            self.assertTrue(server.verify_request(None, ("203.0.113.45", 1)))
+            data = self.handle_as("203.0.113.45", self.ping_request(), server=server)
+            self.assertTrue(data.startswith(b"HTTP/1.1 200"), data[:80])
+        finally:
+            server.server_close()
+
+    def test_rate_limit_still_applies(self):
+        bad = self.ping_request().replace(b"123456", b"999999")
+        for _ in range(mr.AUTH_FAIL_LIMIT):
+            self.assertTrue(self.handle_as("192.168.1.30", bad).startswith(b"HTTP/1.1 401"))
+        self.assertTrue(self.handle_as("192.168.1.30", self.ping_request()).startswith(b"HTTP/1.1 429"))
+
+
 class TransferTests(ReceiverTestCase):
     def test_happy_path(self):
         cap = Capture()

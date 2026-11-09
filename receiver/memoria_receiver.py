@@ -4,7 +4,7 @@
 Contract: docs/transfer-protocol.md (HTTP API) and docs/data-format.md (session folder).
 Standard library only; works on Python 3.9+.
 
-    python3 receiver/memoria_receiver.py [serve] [--port 8765] [--data-dir DIR] [--host 0.0.0.0] [--no-bonjour]
+    python3 receiver/memoria_receiver.py [serve] [--port 8765] [--data-dir DIR] [--host 0.0.0.0] [--no-bonjour] [--allow-remote]
     python3 receiver/memoria_receiver.py list [--data-dir DIR]
     python3 receiver/memoria_receiver.py show <sessionId-or-prefix> [--data-dir DIR]
 """
@@ -17,6 +17,7 @@ import concurrent.futures
 import hashlib
 import hmac
 import http.server
+import ipaddress
 import json
 import os
 import re
@@ -59,6 +60,23 @@ AUTH_FAIL_WINDOW = 300.0
 SIPS_PATH = "/usr/bin/sips"
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "captures"
+
+# Same-network only (docs/transfer-protocol.md「同じネットワークの中だけ」): by default the receiver
+# accepts connections only from these ranges and closes every other connection before reading anything.
+# 100.64.0.0/10 (carrier-grade NAT, RFC 6598) is deliberately NOT here: carriers share it among many
+# customers, so a peer in it is not necessarily on this LAN. iPhone Personal Hotspot (Wi-Fi / USB) uses
+# 172.20.10.0/28, which is RFC 1918. The iOS app checks the same ranges (CaptureCore LocalNetworkPolicy).
+LOCAL_NETWORKS = (
+    ("loopback", ipaddress.ip_network("127.0.0.0/8")),
+    ("private", ipaddress.ip_network("10.0.0.0/8")),
+    ("private", ipaddress.ip_network("172.16.0.0/12")),
+    ("private", ipaddress.ip_network("192.168.0.0/16")),
+    ("linkLocal", ipaddress.ip_network("169.254.0.0/16")),
+    ("loopback", ipaddress.ip_network("::1/128")),
+    ("linkLocal", ipaddress.ip_network("fe80::/10")),
+    ("uniqueLocal", ipaddress.ip_network("fc00::/7")),
+)
+REFUSED_LOG_INTERVAL = 60.0  # log a refused address at most once per this many seconds
 
 
 def log(message: str) -> None:
@@ -158,6 +176,35 @@ def lan_ipv4_addresses():
     except OSError:
         pass
     return found
+
+
+def address_scope(text) -> "str | None":
+    """'loopback' / 'private' / 'linkLocal' / 'uniqueLocal' / 'public', or None if `text` is not an IP address.
+
+    Accepts IPv6 zone ids (fe80::1%en0) and brackets; IPv4-mapped IPv6 (::ffff:a.b.c.d) is judged as IPv4.
+    """
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    text = text.split("%", 1)[0]
+    try:
+        addr = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        addr = addr.ipv4_mapped
+    for scope, network in LOCAL_NETWORKS:
+        if addr.version == network.version and addr in network:
+            return scope
+    return "public"
+
+
+def is_local_address(text) -> bool:
+    """True only for loopback, RFC 1918 private, link-local and IPv6 ULA addresses (same network)."""
+    scope = address_scope(text)
+    return scope is not None and scope != "public"
 
 
 # ---------------------------------------------------------------------------
@@ -697,9 +744,36 @@ class ReceiverServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, receiver: Receiver):
+    def __init__(self, address, receiver: Receiver, allow_remote: bool = False):
         self.receiver = receiver
+        self.allow_remote = allow_remote
+        self._refused = {}  # ip -> [last logged (monotonic), connections refused since]
+        self._refused_lock = threading.Lock()
         super().__init__(address, RequestHandler)
+
+    def client_allowed(self, client_ip) -> bool:
+        return self.allow_remote or is_local_address(client_ip)
+
+    def verify_request(self, request, client_address):
+        """Runs before anything is read: a connection from outside this network is closed without a reply."""
+        if self.client_allowed(client_address[0]):
+            return True
+        self.log_refused(client_address[0])
+        return False
+
+    def log_refused(self, client_ip) -> None:
+        now = time.monotonic()
+        with self._refused_lock:
+            if len(self._refused) > 1000:
+                self._refused = {ip: v for ip, v in self._refused.items() if now - v[0] < REFUSED_LOG_INTERVAL}
+            entry = self._refused.get(client_ip)
+            if entry is not None and now - entry[0] < REFUSED_LOG_INTERVAL:
+                entry[1] += 1
+                return
+            suppressed = entry[1] if entry is not None else 0
+            self._refused[client_ip] = [now, 0]
+        log("[拒否] 外部アドレス %s からの接続を切りました（同じネットワークの中からだけ受け付けます%s）"
+            % (client_ip, "。前回から %d 回" % suppressed if suppressed else ""))
 
     def handle_error(self, request, client_address):
         error = sys.exc_info()[1]
@@ -713,6 +787,14 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "MemoriaReceiver/1"
     timeout = 120
+
+    def handle(self):
+        # Second line of defence after ReceiverServer.verify_request: never read or answer outside callers.
+        if not self.server.client_allowed(self.client_address[0]):
+            self.server.log_refused(self.client_address[0])
+            self.close_connection = True
+            return
+        super().handle()
 
     def do_GET(self):
         self._handle("GET")
@@ -895,7 +977,7 @@ def cmd_serve(args) -> int:
     receiver = Receiver(data_dir, identity, fail_put_every=fail_every)
     receiver.prepare()
     try:
-        server = ReceiverServer((args.host, args.port), receiver)
+        server = ReceiverServer((args.host, args.port), receiver, allow_remote=args.allow_remote)
     except OSError as e:
         print("ポート %d で待ち受けできません: %s" % (args.port, e), file=sys.stderr)
         return 1
@@ -909,10 +991,8 @@ def cmd_serve(args) -> int:
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
 
-    if args.host in ("", "0.0.0.0"):
-        urls = ["http://%s:%d" % (ip, port) for ip in lan_ipv4_addresses()] or ["（LAN の IPv4 アドレスが見つかりません）"]
-    else:
-        urls = ["http://%s:%d" % (args.host, port)]
+    addresses = lan_ipv4_addresses() if args.host in ("", "0.0.0.0") else [args.host]
+    urls, warnings = connect_urls(addresses, port, args.allow_remote)
     code = identity["pairingCode"]
     print("")
     print("Memoria Capture 受信サーバー（protocolVersion %d）" % PROTOCOL_VERSION)
@@ -920,12 +1000,16 @@ def cmd_serve(args) -> int:
     print("  接続先 URL       : %s" % urls[0])
     for url in urls[1:]:
         print("                     %s" % url)
+    print("  受け付ける相手   : %s" % ("どこからでも（--allow-remote）" if args.allow_remote else
+                                      "同じネットワークの中だけ（自宅の LAN・USB ケーブル・インターネット共有）"))
     print("  保存先           : %s" % data_dir)
     print("  Bonjour          : %s" % bonjour_status)
     print("  受信機の名前     : %s" % identity.get("name", ""))
     if fail_every:
         print("  [テスト用] %d 回に 1 回 PUT を 500 で失敗させます（--fail-put-every）" % fail_every)
     print("  終了するには Ctrl-C")
+    for line in warnings:
+        print(line)
     print("", flush=True)
     try:
         server.serve_forever()
@@ -935,6 +1019,47 @@ def cmd_serve(args) -> int:
         server.server_close()
         stop_bonjour(proc)
     return 0
+
+
+def connect_urls(addresses, port: int, allow_remote: bool = False):
+    """(URLs to print, warning lines) for the startup banner.
+
+    Only same-network addresses are offered as connect URLs (link-local last, with a note): connections to a
+    public address are refused anyway, and offering one would invite sending photos over the internet.
+    """
+    def url(ip):
+        return "http://%s:%d" % ("[%s]" % ip if ":" in ip else ip, port)
+
+    scopes = [(ip, address_scope(ip)) for ip in addresses]
+    private = [ip for ip, scope in scopes if scope == "private"]
+    link_local = [ip for ip, scope in scopes if scope in ("linkLocal", "uniqueLocal")]
+    loopback = [ip for ip, scope in scopes if scope == "loopback"]
+    public = [ip for ip, scope in scopes if scope == "public"]
+    names = [ip for ip, scope in scopes if scope is None]  # --host given as a name: checked per connection
+    urls = [url(ip) for ip in private + loopback + names]
+    urls += ["%s（USB ケーブルなどで直接つないだとき）" % url(ip) for ip in link_local]
+    warnings = []
+    if allow_remote:
+        urls += ["%s（公開アドレス・暗号化なし）" % url(ip) for ip in public]
+        warnings += [
+            "",
+            "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+            "  !! 警告: --allow-remote のため、ネットワークの外からの接続も受け付けます。",
+            "  !! 通信は暗号化されていない HTTP です。写真がインターネットを平文で流れることがあります。",
+            "  !! 必要な作業が終わったら、すぐに --allow-remote なしで起動し直してください。",
+            "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
+        ]
+    elif public and not private:
+        warnings += [
+            "",
+            "  [注意] この Mac の IPv4 アドレスは公開 IP アドレス（%s）で、LAN のアドレスがありません。" % "、".join(public),
+            "         このネットワークは自宅などの LAN（プライベートなネットワーク）ではないようです。",
+            "         公開 IP アドレスからの接続は受け付けません（写真をインターネットに流さないため）。",
+            "         iPhone を同じ LAN の Wi-Fi につなぐか、USB ケーブル・インターネット共有で Mac とつないでください。",
+        ]
+    if not urls:
+        urls = ["（同じネットワークのアドレスが見つかりません）"]
+    return urls, warnings
 
 
 def cmd_list(args) -> int:
@@ -1009,6 +1134,8 @@ def main(argv=None) -> int:
     serve.add_argument("--port", type=int, default=8765)
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--no-bonjour", action="store_true", help="Bonjour で広告しない")
+    serve.add_argument("--allow-remote", action="store_true",
+                       help="例外用: 同じネットワークの外（公開 IP アドレス）からの接続も受け付ける。通信は暗号化されないので通常は使わない")
     serve.add_argument("--reset-code", action="store_true", help="ペアリングコードを作り直す")
     serve.add_argument("--fail-put-every", type=int, default=0, metavar="N",
                        help="テスト専用: N 回に 1 回 PUT を 500 で失敗させる（環境変数 MEMORIA_FAIL_PUT_EVERY でも可）")
@@ -1023,7 +1150,7 @@ DATA_README = """\
 # captures/ の読み方
 
 このフォルダは `receiver/memoria_receiver.py`（Memoria Capture の受信サーバー）が書きます。
-iPhone のアプリから同じ Wi-Fi で受け取った撮影セッションが入っています。
+iPhone のアプリから同じネットワーク（自宅の LAN・USB ケーブル・インターネット共有）で受け取った撮影セッションが入っています。
 人と Claude Code などの AI エージェント向けの説明です（受信サーバーが起動のたびに書き直します）。
 
 ## どこを使うか

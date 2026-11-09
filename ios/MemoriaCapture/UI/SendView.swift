@@ -20,6 +20,10 @@ struct SendView: View {
                 if settings.isReceiverConfigured {
                     LabeledContent("Mac", value: settings.receiverDisplayName)
                     LabeledContent("URL", value: settings.receiverURLString)
+                    if settings.receiverIsPublicAddress {
+                        Label(TransferError.notLocalNetworkMessage, systemImage: "exclamationmark.shield")
+                            .font(.subheadline).foregroundStyle(.red)
+                    }
                 } else {
                     Text("送り先の Mac とペアリングコードを設定してください。Mac で受信側（memoria_receiver.py）を起動すると、名前と 6 桁のコードが表示されます。")
                         .font(.subheadline)
@@ -82,7 +86,7 @@ struct SendView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!canSend)
             } footer: {
-                Text("同じ Wi-Fi の Mac に、写真・切り抜き・session.json を送ります。途中で止まっても、もう一度送ると続きから送ります。インターネット上には送りません。")
+                Text("同じネットワーク（自宅の Wi-Fi・USB ケーブル・インターネット共有）の Mac に、写真・切り抜き・session.json を送ります。途中で止まっても、もう一度送ると続きから送ります。公開 IP アドレス（インターネットの向こう）には送りません。")
             }
         }
         .navigationTitle("Mac へ送る")
@@ -93,7 +97,7 @@ struct SendView: View {
     }
 
     private var canSend: Bool {
-        settings.isReceiverConfigured && transfer.sendingSessionId == nil && !masksPending && snapshotInfo != nil
+        settings.isReceiverConfigured && !settings.receiverIsPublicAddress && transfer.sendingSessionId == nil && !masksPending && snapshotInfo != nil
     }
 
     private var sendButtonTitle: String {
@@ -142,7 +146,7 @@ struct SendView: View {
                 つながらないときは次を確かめてください。
                 ・「設定」アプリ > プライバシーとセキュリティ > ローカルネットワーク で「Memoria Capture」をオンにする
                 ・Mac で受信側（memoria_receiver.py）が動いている
-                ・iPhone と Mac が同じ Wi-Fi につながっている
+                ・iPhone と Mac が同じネットワーク（自宅の Wi-Fi・USB ケーブル・インターネット共有）につながっている
                 """)
                 .font(.caption)
                 Button("「設定」アプリを開く") {

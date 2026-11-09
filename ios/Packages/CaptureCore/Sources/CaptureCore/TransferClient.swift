@@ -105,6 +105,8 @@ public enum TransferError: Error, Equatable, Sendable {
     case unexpectedResponse(String)
     /// 受信側ではない（service や protocolVersion が違う）。
     case notReceiver(String)
+    /// 送り先が同じネットワークの中ではない（公開 IP アドレス）。つながずに止める。
+    case notLocalNetwork(host: String)
     /// 送っている間にファイルが変わった。
     case fileChanged(String)
     /// commit で足りないと言われた（409）。
@@ -113,7 +115,7 @@ public enum TransferError: Error, Equatable, Sendable {
     case invalid([String])
     case cancelled
 
-    /// ローカルネットワークの許可が無い・同じ Wi-Fi にいない、のどちらかが考えられる。
+    /// ローカルネットワークの許可が無い・同じネットワークにいない、のどちらかが考えられる。
     public var mayBeLocalNetworkProblem: Bool {
         guard case let .network(code, message) = self else { return false }
         let localNetworkCodes: Set<Int> = [
@@ -124,6 +126,8 @@ public enum TransferError: Error, Equatable, Sendable {
         return localNetworkCodes.contains(code) || message.contains("-65570") || message.localizedCaseInsensitiveContains("local network")
     }
 
+    public static let notLocalNetworkMessage = "同じネットワーク（自宅の Wi-Fi・USB ケーブル・インターネット共有）の Mac にだけ送れます。公開 IP アドレスには送りません"
+
     public var userMessage: String {
         switch self {
         case .network(_, let message): return "受信側につながりませんでした（\(message)）"
@@ -131,6 +135,7 @@ public enum TransferError: Error, Equatable, Sendable {
         case .http(let status, let message): return "受信側でエラーになりました（\(status)：\(message)）"
         case .unexpectedResponse(let message): return "受信側の応答が読めませんでした（\(message)）"
         case .notReceiver(let message): return "Memoria の受信側ではありません（\(message)）"
+        case .notLocalNetwork: return Self.notLocalNetworkMessage
         case .fileChanged(let path): return "送っている間にファイルが変わりました（\(path)）。もう一度送ってください"
         case .incomplete(let missing): return "受信側でファイルが足りませんでした（\(missing.count) 件）。もう一度送ってください"
         case .invalid(let errors): return "受信側が session.json を受け付けませんでした（\(errors.joined(separator: "、"))）"
@@ -207,14 +212,17 @@ public struct TransferClient: Sendable {
     public let transport: any HTTPTransport
     public let sleeper: any Sleeper
     public let retry: RetryPolicy
+    /// 送り先の名前を引く（同じネットワークの中かを確かめるため）。
+    public let resolver: any HostResolving
 
     /// - Parameter receiverURL: `http://<host>:<port>`（`/api/v1` は付けても付けなくてもよい）。
-    public init(receiverURL: URL, token: String, transport: any HTTPTransport = URLSessionTransport(), sleeper: any Sleeper = TaskSleeper(), retry: RetryPolicy = RetryPolicy()) {
+    public init(receiverURL: URL, token: String, transport: any HTTPTransport = URLSessionTransport(), sleeper: any Sleeper = TaskSleeper(), retry: RetryPolicy = RetryPolicy(), resolver: any HostResolving = SystemHostResolver()) {
         apiBase = Self.apiBase(for: receiverURL)
         self.token = token.trimmingCharacters(in: .whitespacesAndNewlines)
         self.transport = transport
         self.sleeper = sleeper
         self.retry = retry
+        self.resolver = resolver
     }
 
     public static func apiBase(for receiverURL: URL) -> URL {
@@ -400,7 +408,12 @@ public struct TransferClient: Sendable {
     // MARK: 送り直し
 
     /// 1 回の要求を、つながらない・5xx・408・429 のときだけ待ってから送り直す。
+    /// つなぐ前に、送り先が同じネットワークの中か（公開 IP アドレスでないか）を毎回確かめる。
     private func perform(_ request: HTTPRequest) async throws -> HTTPResponse {
+        guard let host = request.url.host, !host.isEmpty else {
+            throw TransferError.unexpectedResponse("送り先の URL に host がありません")
+        }
+        try await LocalNetworkPolicy.check(host: host, resolver: resolver)
         var request = request
         request.headers["X-Memoria-Token"] = token
         var lastError: Error?

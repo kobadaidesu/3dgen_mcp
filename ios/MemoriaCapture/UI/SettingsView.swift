@@ -56,12 +56,16 @@ struct SettingsView: View {
                 Text("Mac で memoria_receiver.py を起動すると、ここに出ます。出ないときは、受信側に表示される http://IP:ポート を下に入れてください。")
             }
 
-            Section("送り先") {
+            Section {
                 TextField("http://192.168.0.10:8765", text: $settings.receiverURLString)
                     .keyboardType(.URL)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
                     .onChange(of: settings.receiverURLString) { _, _ in pingResult = nil }
+                if settings.receiverIsPublicAddress {
+                    Label(TransferError.notLocalNetworkMessage, systemImage: "exclamationmark.shield")
+                        .font(.subheadline).foregroundStyle(.red)
+                }
                 TextField("ペアリングコード（6 桁）", text: $settings.pairingCode)
                     .keyboardType(.numberPad)
                 Button {
@@ -72,11 +76,15 @@ struct SettingsView: View {
                         if pinging { Spacer(); ProgressView() }
                     }
                 }
-                .disabled(!settings.isReceiverConfigured || pinging)
+                .disabled(!settings.isReceiverConfigured || settings.receiverIsPublicAddress || pinging)
                 if let pingResult {
                     Text(pingResult).font(.subheadline).foregroundStyle(pingFailed ? .red : .green)
                     if pingFailed && showLocalNetworkHelp { localNetworkHelp }
                 }
+            } header: {
+                Text("送り先")
+            } footer: {
+                Text("送れるのは同じネットワーク（自宅の Wi-Fi・USB ケーブル・インターネット共有）の Mac だけです。公開 IP アドレスには送りません。")
             }
 
             Section {
@@ -118,7 +126,7 @@ struct SettingsView: View {
 
     private var localNetworkHelp: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("「設定」アプリ > プライバシーとセキュリティ > ローカルネットワーク で「Memoria Capture」をオンにしてください。Mac の受信側が動いていて、同じ Wi-Fi につながっている必要があります。")
+            Text("「設定」アプリ > プライバシーとセキュリティ > ローカルネットワーク で「Memoria Capture」をオンにしてください。Mac の受信側が動いていて、同じネットワーク（自宅の Wi-Fi・USB ケーブル・インターネット共有）につながっている必要があります。")
                 .font(.caption)
             Button("「設定」アプリを開く") {
                 if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }

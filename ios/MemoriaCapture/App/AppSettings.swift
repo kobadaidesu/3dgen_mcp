@@ -44,6 +44,12 @@ final class AppSettings: ObservableObject {
 
     var isReceiverConfigured: Bool { receiverURL != nil && !trimmedPairingCode.isEmpty }
 
+    /// 送り先が公開 IP アドレス（の文字）。同じネットワークの中ではないので送らない（名前は送るときに引いて確かめる）。
+    var receiverIsPublicAddress: Bool {
+        guard let host = receiverURL?.host else { return false }
+        return LocalNetworkPolicy.isPublicAddressLiteral(host)
+    }
+
     var receiverDisplayName: String {
         if !receiverName.isEmpty { return receiverName }
         return receiverURLString.isEmpty ? "未設定" : receiverURLString
