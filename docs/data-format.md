@@ -42,8 +42,8 @@ iPhone 側と PC 側で同じ形です。1 つの撮影セッションが 1 つ�
   "conventions": { "…": "上の表と同じ内容の文字列" },
   "device": { "model": "iPhone15,4", "systemName": "iOS", "systemVersion": "26.6",
               "appVersion": "0.1.0", "appBuild": "1" },
-  "object": {                              // 作品の大きさ（ユーザーが AR のガイドで合わせた値）
-    "heightM": 0.15, "radiusM": 0.08, "source": "userAdjusted"
+  "object": {                              // 作品の大きさ（ユーザーが AR のガイドで合わせた値）。最後に設定した基準の大きさ
+    "heightM": 0.15, "radiusM": 0.08, "source": "userAdjusted"   // （前の版との互換のため。写真に使うのは referenceFrames[].object）
   },
   "referenceFrames": [                     // 基準を設定するたびに 1 つ増える
     {
@@ -53,7 +53,10 @@ iPhone 側と PC 側で同じ形です。1 つの撮影セッションが 1 つ�
       "objectToWorld": [[1,0,0,0.1],[0,1,0,-0.7],[0,0,1,-0.4],[0,0,0,1]], // 正面が決まるまで null
       "frontPhotoId": "…",                 // 正面を決めた写真（最初の写真）。まだなら null
       "invalidatedAt": null,               // 中断・リセット・基準の再設定で無効になった時刻
-      "invalidationReason": null           // "sessionInterrupted" | "trackingLost" | "userReset" | "anchorDrift"
+      "invalidationReason": null,          // "sessionInterrupted" | "trackingLost" | "userReset" | "anchorDrift"
+      "object": {                          // この基準を設定したときの作品の大きさ（上の object と同じ形）
+        "heightM": 0.15, "radiusM": 0.08, "source": "userAdjusted"
+      }                                    // この項目より前に作った基準は null（または無い）→ 上の object を使う
     }
   ],
   "directionPlan": {
@@ -115,9 +118,18 @@ iPhone 側と PC 側で同じ形です。1 つの撮影セッションが 1 つ�
         "error": null,
         "inputRegion": { "x": 652, "y": 617, "width": 2447, "height": 2407 },
                                            // Vision に渡した範囲（写真のピクセル、原点は左上、センサーの向き）。全体なら null
-        "inputRegionSource": "projectedCylinder"
+        "inputRegionSource": "projectedCylinder",
                                            // "projectedCylinder"（作品の円柱を投影した範囲）| "fullImage"（写真の全体）
                                            // まだ作っていない・この項目が入る前に作ったマスクは null
+        "check": {                         // マスクが作品らしいか（下の「マスクの確かめ」）。まだ確かめていない・マスクが無いときは null
+          "status": "ok",                  // "ok" | "suspicious" | "unknown"
+          "reasons": [],                   // suspicious・unknown の理由（下の表）
+          "insideSilhouetteRatio": 1.0,    // マスクのうち、作品の輪郭（少し広げたもの）の中にある割合。unknown なら null
+          "cropCoverage": 0.14,            // マスクが切り抜き（inputRegion）に占める割合。unknown なら null
+          "silhouetteAreaRatio": 0.27,     // マスクの面積 ÷ 作品の輪郭の面積。unknown なら null
+          "centerOffset": 0.06,            // マスクの重心と作品の中心の距離 ÷ 輪郭の外接長方形の長い辺。unknown なら null
+          "touchedCropEdges": 0            // マスクが届いている切り抜きの辺の数（0〜4）。unknown なら null
+        }
       }
     }
   ]
@@ -128,11 +140,13 @@ iPhone 側と PC 側で同じ形です。1 つの撮影セッションが 1 つ�
 - 撮影に失敗した写真・保存に失敗した写真は `photos` に入りません。
 - `direction.confirmed` が true になるのは、写真の `trackingState` が `normal` で、無効になっていない基準（`objectToWorld` あり）があるときだけです。
 - 別の `referenceFrameId` の写真どうしの姿勢は比べられません（同じ世界座標とは限らない）。
+- 作品の大きさは、写真の `referenceFrameId` の基準の `object` を使います（無ければ上の `object`）。基準を設定し直すと上の `object` は新しい大きさになりますが、前の基準の写真は前の大きさで撮っています。`referenceFrames[].object` は後から足した項目で、無くても読めるので `schemaVersion` は 1 のままです。
+- 正面を決める 1 枚目（その基準の最初の確定した写真）の方位は 0° です。仰角が方位 0° の方向（一番近い仰角のもの）の許容に入っていれば、その方向の `targetId`（`a000-e20` など）が付きます。外れていると `targetId` は null で、正面の方向はあとで撮り直すことになるので、撮影画面は 1 枚目の前に高さを案内します（警告だけで、撮るのは止めない）。
 
 ## マスクの作り方（`mask`）
 
 - Vision（`VNGenerateForegroundInstanceMaskRequest`）には、写真の全体ではなく **作品のまわりを切り抜いた画像** を渡します。写真の全体を渡すと、作品が小さいときに机やマットのような大きな面を選ぶ（または何も見つからない）ためです。
-  - 切り抜く範囲：その写真の `referenceFrameId` の基準の `basePointWorld` と `object`（`radiusM`・`heightM`）の円柱を、その写真の `cameraToWorld`・`intrinsics` で投影した外接長方形を、中心のまわりに 1.2 倍に広げ、幅・高さを 512 ピクセル以上にし、写真からはみ出すときは大きさを保ったまま内側へずらしてから写真の中に切り詰めます。session.json の値だけで決まるので、撮ったあとの写真でも作り直せます。
+  - 切り抜く範囲：その写真の `referenceFrameId` の基準の `basePointWorld` と、その基準の `object`（無ければ上の `object`。`radiusM`・`heightM`）の円柱を、その写真の `cameraToWorld`・`intrinsics` で投影した外接長方形を、中心のまわりに 1.2 倍に広げ、幅・高さを 512 ピクセル以上にし、写真からはみ出すときは大きさを保ったまま内側へずらしてから写真の中に切り詰めます。session.json の値だけで決まるので、撮ったあとの写真でも作り直せます。
   - 自動で選ぶ物は、切り抜きの中で投影した円柱と重なる物です。選んだ物が切り抜きの 85% より広い（机やマットらしい）ときは、ほかの物のうち円柱の輪郭と一番よく重なる物に替えます。
   - 作品らしい物が見つからない（何も無い・広すぎる物だけ）ときは、1.0 倍の切り抜きでもう一度試します。`inputRegion` は実際にマスクを作った方の範囲です。
   - 基準が無い・作品の大きさが無い・作品がカメラの後ろ・写真の外のときは、写真の全体を渡します（`inputRegion` は null、`inputRegionSource` は `"fullImage"`）。
@@ -140,4 +154,38 @@ iPhone 側と PC 側で同じ形です。1 つの撮影セッションが 1 つ�
 - `selectedInstances`・`instanceCount` の番号は、`inputRegion` の切り抜きに対して Vision が付けた番号です。
 - `inputRegion`・`inputRegionSource` は後から足した項目です。無くても読めるので（無ければ null と同じ）、`schemaVersion` は 1 のままです。
 - 状態の移り方：`notGenerated` →（作り始める）`processing` → `candidate`（物を選べた）| `noObject`（物が無い・選べない）| `failed`（`error` に理由。写真は残す）。`candidate` はユーザーが確認すると `confirmed`、選び直しても `candidate`（`selection` が `"user"`）。
+- `check` は後から足した項目です。無くても読めるので（無ければ null と同じ）、`schemaVersion` は 1 のままです。
 - 切り抜きの作り直し（iPhone の確認画面の「切り抜きを作り直す」）：元写真は変えず、1 枚ずつ順番に `processing` から同じように作り直します（一覧からはまとめて、`confirmed` の写真は除く。写真 1 枚の画面からは、その写真を `confirmed` でも作り直す）。
+
+## マスクの確かめ（`mask.check`）
+
+Vision が作品ではなく、撮る人の体・後ろのスピーカー・机のような物を選ぶことがあるので、マスクを作ったら（自動でも選び直しでも）すぐに、投影した作品の円柱の輪郭と比べます。結果が `suspicious` の写真は、撮影中に同じ方向を撮り直します。
+
+- 比べる輪郭：`inputRegionSource` が `"projectedCylinder"` のマスクだけ。切り抜きを作ったときと同じ円柱（その写真の基準の `basePointWorld` と `object`）を投影した凸包を、外接長方形の中心のまわりに 1.05 倍に広げたもの。
+- 写真の全体から作ったマスク（基準が無い・投影できない）、`inputRegionSource` の無い前の版のマスクは `"unknown"`（`reasons` は `["noProjection"]`、割合は null）。
+- 切り抜きを長い辺 512 の格子に間引いて数えます（写真の大きさのマスクからでも、切り抜きの大きさのマスクからでも同じ値になる）。
+- 次のどれかに当てはまると `"suspicious"`、どれにも当てはまらなければ `"ok"`。しきい値は iPhone 側の `MaskCheckThresholds` の 1 か所にまとめています（実機の写真で決めた値。変えることがあります）。
+
+| `reasons` | 条件 |
+|---|---|
+| `outsideObject` | `insideSilhouetteRatio` < 0.93 |
+| `touchesCropEdge` | `touchedCropEdges` ≥ 2（切り抜きの辺から短い辺の 1% の帯に、その辺の 5% を超えるマスクがある辺の数） |
+| `tooLarge` | `silhouetteAreaRatio` > 1.6、または `cropCoverage` > 0.6 |
+| `tooSmall` | `silhouetteAreaRatio` < 0.03 |
+| `offCenter` | `centerOffset` > 0.35 |
+| `empty` | マスクが空 |
+| `noProjection` | （`unknown` のとき）作品を投影できない |
+
+- `status` が `failed`・`noObject`・`notGenerated`・`processing` のときは `check` は null です。ユーザーが確認した（`confirmed`）マスクは、`check` が `suspicious` でも使えるマスクとして扱います。
+- `check` の無い前の版のマスクは、iPhone のアプリを起動したときに確かめて書き足します（マスクは作り直さない）。
+
+## 撮影の進み具合（session.json には書かない）
+
+iPhone は次の決まりで、方向がそろったかを session.json から計算します（項目は足さない）。PC 側で同じ判定をしたいときも、この決まりで計算できます。
+
+- 数えるのは、その基準（`referenceFrameId`）で撮った、`direction.confirmed` が true で `targetId` のある写真だけ。撮影画面では今の基準、確認画面・送信画面では最後に設定した基準で数えます。
+- 写真のマスクが「使える」：`mask.status` が `confirmed`、または `candidate` で `check.status` が `ok`。「まだ分からない」：`notGenerated`・`processing`、または `candidate` で `check` が null。それ以外（`suspicious`・`unknown`・`failed`・`noObject`）は「使えない」。
+- 方向ごとの代表の写真：使える写真のうち一番新しいもの。無ければ一番新しい写真。代表の写真で、方向は「そろった」（使える）・「確認中」（まだ分からない）・「撮り直し」（使えない）のどれかになります。
+- 代表ではない写真は「置き換え済み」です（写真は消さない）。ただし代表より新しくて「まだ分からない」写真は、置き換え済みにしません。確認画面の「置き換え済みを削除」で消せます。
+- 撮影中は「確認中」の方向も撮ったとみなし（自動撮影ですぐに撮り直さない）、「撮り直し」の方向は撮っていないとみなして、自動撮影がもう一度撮ります。
+- すべての方向が「そろった」とき、送る準備ができたとみなします。そろっていなくても送れます。

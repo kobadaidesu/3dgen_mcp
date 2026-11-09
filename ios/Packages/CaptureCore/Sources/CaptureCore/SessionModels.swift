@@ -61,7 +61,8 @@ public struct CaptureSession: Codable, Equatable, Sendable {
     public var updatedAt: Date
     public var conventions: [String: String]
     public var device: DeviceInfo
-    /// 作品の大きさ。基準を確定するまでは null（ユーザーが合わせていない値を推測で入れない）。
+    /// 作品の大きさ（最後に設定した基準の大きさ。前の版との互換のために残す）。基準を確定するまでは null
+    /// （ユーザーが合わせていない値を推測で入れない）。写真に使う大きさは `objectSize(referenceFrameId:)`。
     @NullCodable public var object: ObjectSize?
     public var referenceFrames: [ReferenceFrame]
     public var directionPlan: DirectionPlan
@@ -97,6 +98,13 @@ public struct CaptureSession: Codable, Equatable, Sendable {
     public func referenceFrame(id: String?) -> ReferenceFrame? {
         guard let id else { return nil }
         return referenceFrames.first { $0.id == id }
+    }
+
+    /// その基準で撮った写真に使う作品の大きさ。基準ごとの大きさ（`referenceFrames[].object`）が無い
+    /// （この項目より前に作った基準）ときは、セッションの `object`（最後に設定した大きさ）。基準が無ければ nil。
+    public func objectSize(referenceFrameId: String?) -> ObjectSize? {
+        guard let reference = referenceFrame(id: referenceFrameId) else { return nil }
+        return reference.object ?? object
     }
 
     public func photo(id: String) -> Photo? {
@@ -144,8 +152,10 @@ public struct ReferenceFrame: Codable, Equatable, Sendable {
     @NullCodable public var frontPhotoId: String?
     @NullCodable public var invalidatedAt: Date?
     @NullCodable public var invalidationReason: InvalidationReason?
+    /// この基準を設定したときの作品の大きさ。この項目より前に作った基準は null（セッションの `object` を使う）。
+    @NullCodable public var object: ObjectSize?
 
-    public init(id: String, createdAt: Date, basePointWorld: SIMD3<Double>) {
+    public init(id: String, createdAt: Date, basePointWorld: SIMD3<Double>, object: ObjectSize? = nil) {
         self.id = id
         self.createdAt = createdAt
         self.basePointWorld = Vector3(basePointWorld)
@@ -153,6 +163,7 @@ public struct ReferenceFrame: Codable, Equatable, Sendable {
         frontPhotoId = nil
         invalidatedAt = nil
         invalidationReason = nil
+        self.object = object
     }
 
     public var isValid: Bool { invalidatedAt == nil }
@@ -346,11 +357,13 @@ public struct MaskInfo: Codable, Equatable, Sendable {
     @NullCodable public var inputRegion: PixelBox?
     /// 範囲の決め方。まだ作っていないとき・この項目より前に作ったマスク（写真の全体を渡していた）は null。
     @NullCodable public var inputRegionSource: MaskInputRegionSource?
+    /// マスクが作品らしいか（投影した作品の輪郭と比べた結果）。まだ確かめていない・マスクが無いときは null。
+    @NullCodable public var check: MaskCheck?
 
     public init(
         status: MaskStatus, file: String? = nil, width: Int? = nil, height: Int? = nil, method: String? = nil,
         instanceCount: Int? = nil, selectedInstances: [Int] = [], selection: MaskSelectionKind? = nil, error: String? = nil,
-        inputRegion: PixelBox? = nil, inputRegionSource: MaskInputRegionSource? = nil
+        inputRegion: PixelBox? = nil, inputRegionSource: MaskInputRegionSource? = nil, check: MaskCheck? = nil
     ) {
         self.status = status
         self.file = file
@@ -363,6 +376,7 @@ public struct MaskInfo: Codable, Equatable, Sendable {
         self.error = error
         self.inputRegion = inputRegion
         self.inputRegionSource = inputRegionSource
+        self.check = check
     }
 
     public static let notGenerated = MaskInfo(status: .notGenerated)

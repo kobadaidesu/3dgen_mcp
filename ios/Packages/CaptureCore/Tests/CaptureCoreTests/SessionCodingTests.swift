@@ -64,7 +64,8 @@ final class SessionCodingTests: XCTestCase {
         var s = exampleSession()
         let j = try json(s)
         let ref = try XCTUnwrap((j["referenceFrames"] as? [[String: Any]])?.first)
-        XCTAssertEqual(Set(ref.keys), ["id", "createdAt", "basePointWorld", "objectToWorld", "frontPhotoId", "invalidatedAt", "invalidationReason"])
+        XCTAssertEqual(Set(ref.keys), ["id", "createdAt", "basePointWorld", "objectToWorld", "frontPhotoId", "invalidatedAt", "invalidationReason", "object"])
+        XCTAssertTrue(ref["object"] is NSNull)  // この項目より前の基準と同じ（セッションの object を使う）
         XCTAssertEqual(ref["basePointWorld"] as? [Double], [0.1, -0.7, -0.4])
         let m = try XCTUnwrap(ref["objectToWorld"] as? [[Double]])
         XCTAssertEqual(m[0], [1, 0, 0, 0.1])  // 行優先：平行移動は各行の最後
@@ -116,7 +117,8 @@ final class SessionCodingTests: XCTestCase {
         let saved = try XCTUnwrap(quality["saved"] as? [String: Any])
         XCTAssertEqual(Set(saved.keys), ["meanLuma", "sharpness", "brightness", "blur"])
         let mask = try XCTUnwrap(photo["mask"] as? [String: Any])
-        XCTAssertEqual(Set(mask.keys), ["status", "file", "width", "height", "method", "instanceCount", "selectedInstances", "selection", "error", "inputRegion", "inputRegionSource"])
+        XCTAssertEqual(Set(mask.keys), ["status", "file", "width", "height", "method", "instanceCount", "selectedInstances", "selection", "error", "inputRegion", "inputRegionSource", "check"])
+        XCTAssertTrue(mask["check"] is NSNull)
         XCTAssertEqual(mask["method"] as? String, "VNGenerateForegroundInstanceMaskRequest")
         XCTAssertTrue(mask["error"] is NSNull)
     }

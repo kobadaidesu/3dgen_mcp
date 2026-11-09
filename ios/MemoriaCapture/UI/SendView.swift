@@ -12,6 +12,7 @@ struct SendView: View {
     @State private var status: TransferDisplayStatus = .notSent
     @State private var masksPending = false
     @State private var prepareError: String?
+    @State private var readiness: Readiness?
 
     var body: some View {
         Form {
@@ -23,6 +24,12 @@ struct SendView: View {
                     Text("送り先の Mac とペアリングコードを設定してください。Mac で受信側（memoria_receiver.py）を起動すると、名前と 6 桁のコードが表示されます。")
                         .font(.subheadline)
                     Button("設定を開く") { model.open(.settings) }
+                }
+            }
+
+            if let readiness {
+                Section("そろっているか") {
+                    ReadinessView(readiness: readiness)
                 }
             }
 
@@ -102,10 +109,12 @@ struct SendView: View {
         let store = model.store, masks = model.masks, id = sessionId
         Task.detached(priority: .userInitiated) {
             let pending = masks.hasPending(sessionId: id)
+            let readiness = (try? store.loadSession(id)).map { Readiness.make(session: $0, pendingPhotoIds: masks.pendingPhotoIds()) }
             let result = Result { try store.makeTransferSnapshot(id) }
             let status = store.transferDisplayStatus(id)
             await MainActor.run {
                 masksPending = pending
+                self.readiness = readiness
                 self.status = status
                 switch result {
                 case .success(let snapshot):

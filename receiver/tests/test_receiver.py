@@ -375,6 +375,25 @@ class TransferTests(ReceiverTestCase):
                 self.assertFalse(self.published(cap).exists())
         self.assertEqual(self.index(), [])
 
+    def test_accepts_additive_optional_fields(self):
+        # schemaVersion 1 のまま足した項目（mask.check・referenceFrames[].object）があっても受け取る。
+        cap = Capture()
+        cap.session["object"] = {"heightM": 0.04, "radiusM": 0.09, "source": "userAdjusted"}
+        cap.session["referenceFrames"] = [
+            {"id": "ref-1", "basePointWorld": [0, 0, 0], "object": {"heightM": 0.15, "radiusM": 0.09, "source": "userAdjusted"}},
+            {"id": "ref-2", "basePointWorld": [0, 0, 0], "object": None},
+        ]
+        cap.session["photos"][0]["mask"]["check"] = {
+            "status": "suspicious", "reasons": ["outsideObject", "touchesCropEdge"],
+            "insideSilhouetteRatio": 0.654, "cropCoverage": 0.318, "silhouetteAreaRatio": 0.579,
+            "centerOffset": 0.381, "touchedCropEdges": 2}
+        cap.session["photos"][1]["mask"]["check"] = None
+        cap.set_session(cap.session)
+        self.send(cap)
+        published = json.loads((self.published(cap) / "session.json").read_text("utf-8"))
+        self.assertEqual(published["photos"][0]["mask"]["check"]["status"], "suspicious")
+        self.assertEqual(published["referenceFrames"][0]["object"]["heightM"], 0.15)
+
     def test_resend_with_changed_manifest_replaces_old_version(self):
         cap = Capture()
         old_id, _ = self.send(cap)

@@ -137,7 +137,9 @@ final class AppModel: ObservableObject {
     private func resumeUnfinishedMasks() {
         store.recoverInterruptedMasks()
         for session in store.listSessions() {
-            for photo in session.photos where photo.mask.status == .notGenerated || photo.quality.saved == nil {
+            // 確かめの結果（mask.check）の無いマスクは、確かめだけする。
+            for photo in session.photos where photo.mask.status == .notGenerated || photo.quality.saved == nil
+                || (photo.mask.status.hasFile && photo.mask.check == nil) {
                 masks.enqueue(sessionId: session.sessionId, photoId: photo.photoId)
             }
         }

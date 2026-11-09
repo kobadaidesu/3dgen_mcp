@@ -75,7 +75,7 @@ public enum PhotoRecorder {
            let index = session.referenceFrames.firstIndex(where: { $0.id == refId }) {
             let reference = session.referenceFrames[index]
             let base = reference.basePointWorld.simd
-            let height = session.object?.heightM ?? 0
+            let height = session.objectSize(referenceFrameId: refId)?.heightM ?? 0
             let ed = Geometry.elevationAndDistance(cameraPosition: cameraPosition, basePoint: base, heightM: height)
             elevation = ed.elevationDeg
             distance = ed.distanceM

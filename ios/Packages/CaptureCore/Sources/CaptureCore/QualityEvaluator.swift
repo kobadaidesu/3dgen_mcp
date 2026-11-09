@@ -289,6 +289,10 @@ public struct QualityEvaluator: Sendable {
             return CheckResult(kind: .direction, status: .unknown, message: "基準を設定すると撮る方向を案内します")
         }
         if s.reference == .awaitingFront || direction.azimuthDeg == nil {
+            // 1 枚目が正面になる。高さも正面の方向（方位 0°）に合っていないと、正面の方向として数えられない（警告だけで撮れる）。
+            if direction.frontElevationOK == false {
+                return CheckResult(kind: .direction, status: .warning, message: direction.guidance)
+            }
             return CheckResult(kind: .direction, status: .ok, message: "正面から撮ってください（1 枚目が正面になります）")
         }
         if direction.allCovered || direction.isOnUncoveredTarget {
@@ -342,5 +346,33 @@ public struct QualityEvaluator: Sendable {
         let brightness: CheckStatus = (meanLuma < thresholds.minMeanLuma || meanLuma > thresholds.maxMeanLuma) ? .warning : .ok
         let blur: CheckStatus = sharpness < thresholds.minSavedSharpness ? .warning : .ok
         return SavedQuality(meanLuma: meanLuma, sharpness: sharpness, brightness: brightness, blur: blur)
+    }
+}
+
+// MARK: - シャッター
+
+/// シャッターを押したときにすること。
+public enum ShutterAction: Equatable, Sendable {
+    /// 撮れない（トラッキングできない・撮影中）。
+    case unavailable
+    /// 基準が無いことを確かめる（「基準を設定する」か「このまま撮る」）。
+    case confirmNoReference
+    /// 警告を確かめる（「このまま撮る」か「やめる」）。
+    case confirmWarnings
+    /// そのまま撮る。
+    case capture
+}
+
+public enum ShutterPolicy {
+    /// - Parameters:
+    ///   - hasReference: 有効な基準がある（撮影できる状態）。
+    ///   - noReferenceAcknowledged: 基準なしで撮ることを、このシャッターで確かめ済み。
+    public static func action(
+        hasReference: Bool, assessment: QualityAssessment, captureInFlight: Bool, noReferenceAcknowledged: Bool = false
+    ) -> ShutterAction {
+        guard !captureInFlight, assessment.canManualCapture else { return .unavailable }
+        // 基準が無いと方向が記録されず、切り抜きも写真の全体から作るので不正確になる。既定では基準を求める。
+        if !hasReference && !noReferenceAcknowledged { return .confirmNoReference }
+        return assessment.hasWarnings ? .confirmWarnings : .capture
     }
 }

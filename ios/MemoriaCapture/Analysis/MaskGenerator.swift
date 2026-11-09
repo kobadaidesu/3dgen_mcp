@@ -130,8 +130,9 @@ enum MaskGenerator {
         return InstanceLabelMap(labels: labels, width: width, height: height)
     }
 
-    /// 選んだ物だけのマスク（写真と同じ大きさ、8 bit グレー、255 = 作品、切り抜きの外は 0）の PNG。
-    static func maskPNG(analysis: InstanceAnalysis, instances: [Int]) throws -> (png: Data, width: Int, height: Int) {
+    /// 選んだ物だけのマスク（写真と同じ大きさ、8 bit グレー、255 = 作品、切り抜きの外は 0）の PNG と、
+    /// 作品の輪郭と比べた確かめの結果（`mask.check`）。
+    static func maskPNG(analysis: InstanceAnalysis, instances: [Int]) throws -> (png: Data, width: Int, height: Int, check: MaskCheck) {
         guard let observation = analysis.observation else { throw MaskGeneratorError.visionFailed("noObservation") }
         let buffer: CVPixelBuffer
         do {
@@ -165,8 +166,22 @@ enum MaskGenerator {
             throw MaskGeneratorError.pixelFormat(format)
         }
         let plan = analysis.plan
+        let check = MaskPlausibility.evaluate(cropMask: pixels, width: width, height: height, plan: plan)
         let full = MaskCanvas.paste(pixels, region: region, fullWidth: plan.imageWidth, fullHeight: plan.imageHeight)
         guard let png = ImageLoading.grayPNG(pixels: full, width: plan.imageWidth, height: plan.imageHeight) else { throw MaskGeneratorError.encodeFailed }
-        return (png, plan.imageWidth, plan.imageHeight)
+        return (png, plan.imageWidth, plan.imageHeight, check)
+    }
+
+    /// 保存したマスク（写真と同じ大きさの PNG）を、作品の輪郭と比べて確かめる（`mask.check` の無い前の版のマスクのため）。
+    /// 確かめるだけなので縮小して読む。
+    static func checkSavedMask(url: URL, plan: MaskCropPlan?) -> MaskCheck? {
+        guard let plan else { return .unknown }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: 1024,
+                kCGImageSourceCreateThumbnailWithTransform: false,
+              ] as CFDictionary),
+              let gray = ImageLoading.grayBuffer(from: image) else { return nil }
+        return MaskPlausibility.evaluate(fullMask: gray.pixels, width: gray.width, height: gray.height, plan: plan)
     }
 }

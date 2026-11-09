@@ -84,6 +84,11 @@ final class MaskProcessor: @unchecked Sendable {
             //    作り直しは、確認済みを除く指定なら確認済みを残す。
             switch job {
             case .initial:
+                // 前の版で作ったマスク（確かめの結果が無い）は、作り直さずに確かめだけする。
+                if photo.mask.status.hasFile, photo.mask.check == nil {
+                    checkExistingMask(sessionId: sessionId, photo: photo, session: session)
+                    return
+                }
                 guard photo.mask.status == .notGenerated || photo.mask.status == .processing else { return }
             case .regenerate(let includeConfirmed):
                 guard includeConfirmed || photo.mask.status != .confirmed else { return }
@@ -116,6 +121,17 @@ final class MaskProcessor: @unchecked Sendable {
         }
     }
 
+    /// 保存したマスクを作品の輪郭と比べて、`mask.check` を書く（マスクと状態は変えない）。
+    private func checkExistingMask(sessionId: String, photo: Photo, session: CaptureSession) {
+        let plan = MaskCropPlanner.recordedPlan(photo: photo, session: session)
+        guard let check = MaskGenerator.checkSavedMask(url: store.maskURL(sessionId, photoId: photo.photoId), plan: plan) else { return }
+        _ = try? store.updateSession(sessionId) { s in
+            if let i = s.photos.firstIndex(where: { $0.photoId == photo.photoId }), s.photos[i].mask.status.hasFile, s.photos[i].mask.check == nil {
+                s.photos[i].mask.check = check
+            }
+        }
+    }
+
     private func setMask(sessionId: String, photoId: String, _ mask: MaskInfo) {
         _ = try? store.updateSession(sessionId) { s in
             if let i = s.photos.firstIndex(where: { $0.photoId == photoId }) { s.photos[i].mask = mask }
@@ -139,7 +155,7 @@ final class MaskProcessor: @unchecked Sendable {
         }
         try store.saveMask(sessionId: sessionId, photoId: photo.photoId, pngData: result.png, mask: MaskInfo(
             status: .candidate, width: result.width, height: result.height, method: MaskInfo.visionMethod,
-            instanceCount: count, selectedInstances: selected, selection: selection
+            instanceCount: count, selectedInstances: selected, selection: selection, check: result.check
         ).recording(plan))
     }
 

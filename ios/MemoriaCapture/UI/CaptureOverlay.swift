@@ -15,6 +15,9 @@ struct CaptureOverlay: View {
             if controller.phase == .capturing {
                 topPanel
             }
+            if controller.isComplete {
+                completePanel
+            }
             guidance
             Spacer(minLength: 0)
             if controller.phase == .capturing {
@@ -32,21 +35,54 @@ struct CaptureOverlay: View {
     private var topPanel: some View {
         HStack(alignment: .center, spacing: 12) {
             DirectionMiniMap(
-                plan: controller.plan, covered: controller.covered,
+                plan: controller.plan, progress: controller.progress,
                 nextId: controller.direction?.nextTarget?.id,
                 currentAzimuth: controller.direction?.azimuthDeg,
                 hasFront: controller.referenceState == .ready
             )
             .frame(width: 96, height: 96)
             VStack(alignment: .leading, spacing: 6) {
-                Text("\(controller.covered.count) / \(controller.plan.targets.count)")
+                Text("\(controller.progress.doneCount) / \(controller.plan.targets.count)")
                     .font(.system(size: 28, weight: .bold, design: .rounded))
                     .monospacedDigit()
-                Text(controller.referenceState == .ready ? "撮影済みの方向" : "まず正面から 1 枚")
+                Text(controller.referenceState == .ready ? "そろった方向" : "まず正面から 1 枚")
                     .font(.caption).foregroundStyle(.secondary)
-                ElevationIndicator(current: controller.direction?.elevationDeg, target: controller.direction?.nextTarget?.elevationDeg)
+                progressDetail
+                ElevationIndicator(
+                    current: controller.direction?.elevationDeg,
+                    target: (controller.direction?.frontTarget ?? controller.direction?.nextTarget)?.elevationDeg
+                )
             }
             Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// 確認中・撮り直しの数。
+    @ViewBuilder
+    private var progressDetail: some View {
+        let checking = controller.progress.checkingIds.count, retake = controller.progress.retakeIds.count
+        if checking > 0 || retake > 0 {
+            HStack(spacing: 8) {
+                if checking > 0 { Text("確認中 \(checking)").foregroundStyle(.yellow) }
+                if retake > 0 { Text("撮り直し \(retake)").foregroundStyle(.orange) }
+            }
+            .font(.caption.bold())
+        }
+    }
+
+    /// すべての方向がそろったとき。
+    private var completePanel: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "checkmark.seal.fill").font(.title2).foregroundStyle(.green)
+            Text("そろいました（\(controller.progress.doneCount)/\(controller.progress.totalCount)）— 確認して送信できます")
+                .font(.subheadline.bold())
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button("確認へ", action: onReview)
+                .buttonStyle(.borderedProminent)
+                .disabled(controller.captureInFlight)
         }
         .padding(10)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
@@ -121,7 +157,7 @@ struct CaptureOverlay: View {
                         .font(.subheadline)
                         .buttonStyle(.bordered)
                 } else {
-                    Text("基準なしでも撮れます（方向は参考値）")
+                    Text("先に基準を設定してください（基準なしだと方向が記録されません）")
                         .font(.caption).foregroundStyle(.white)
                 }
             }
@@ -245,10 +281,10 @@ struct StatusChips: View {
     }
 }
 
-/// 上から見た撮影方向の地図（正面が上。撮影済み＝緑、次＝オレンジ、今のカメラ＝青の矢印）。
+/// 上から見た撮影方向の地図（正面が下。そろった＝緑、確認中＝黄、撮り直し＝オレンジ、次＝水色、今のカメラ＝青）。
 struct DirectionMiniMap: View {
     let plan: DirectionPlan
-    let covered: Set<String>
+    let progress: CoverageProgress
     let nextId: String?
     let currentAzimuth: Double?
     let hasFront: Bool
@@ -268,10 +304,16 @@ struct DirectionMiniMap: View {
                         // 上から見て、正面（0°）が下側（カメラ側）、右へ回る（+X）と右側。
                         let ring = target.elevationDeg > 35 ? radius * 0.55 : radius
                         let p = point(azimuth: target.azimuthDeg, radius: ring, center: center)
-                        Circle()
-                            .fill(covered.contains(target.id) ? Color.green : (target.id == nextId ? Color.orange : Color.white))
-                            .frame(width: target.id == nextId ? 14 : 10, height: target.id == nextId ? 14 : 10)
-                            .position(p)
+                        let state = progress.state(of: target.id)
+                        let size: CGFloat = target.id == nextId ? 14 : 10
+                        ZStack {
+                            Circle().fill(Self.color(state, isNext: target.id == nextId))
+                            if state == .retake {
+                                Image(systemName: "arrow.counterclockwise").font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
+                            }
+                        }
+                        .frame(width: state == .retake ? 14 : size, height: state == .retake ? 14 : size)
+                        .position(p)
                     }
                     if let currentAzimuth {
                         let p = point(azimuth: currentAzimuth, radius: radius + 6, center: center)
@@ -287,6 +329,15 @@ struct DirectionMiniMap: View {
                         .position(x: center.x, y: center.y + radius - 2)
                 }
             }
+        }
+    }
+
+    static func color(_ state: TargetState, isNext: Bool) -> Color {
+        switch state {
+        case .done: return .green
+        case .checking: return .yellow
+        case .retake: return .orange
+        case .notShot: return isNext ? .cyan : .white
         }
     }
 

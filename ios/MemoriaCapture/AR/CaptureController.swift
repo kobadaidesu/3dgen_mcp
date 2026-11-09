@@ -31,13 +31,18 @@ final class CaptureController: ObservableObject {
     @Published var radiusCm: Double = 8 { didSet { updateObjectPreview() } }
     @Published private(set) var assessment = QualityAssessment.initial
     @Published private(set) var direction: DirectionContext?
+    /// 撮影中に撮ったとみなす方向（そろった ＋ 確認中）。次に撮る方向・自動撮影はこれ以外から選ぶ。
     @Published private(set) var covered: Set<String> = []
+    /// 今の基準の方向ごとの状態（そろった・確認中・撮り直し・未撮影）。
+    @Published private(set) var progress: CoverageProgress
     @Published private(set) var plan: DirectionPlan
     @Published private(set) var captureInFlight = false
     @Published private(set) var photoCount = 0
     @Published private(set) var referenceState: ReferenceState = .none
     @Published var banner: Banner?
     @Published var showWarningsSheet = false
+    /// 基準が無いときにシャッターを押した（「基準を設定する」か「このまま撮る」）。
+    @Published var showNoReferenceDialog = false
     @Published var autoCaptureEnabled: Bool
 
     static let heightRangeCm: ClosedRange<Double> = 3...60
@@ -66,6 +71,8 @@ final class CaptureController: ObservableObject {
     private var wasBackgrounded = false
     private var bannerTask: Task<Void, Never>?
     private var lastMarkerKey = ""
+    /// 前に読んだときの撮り直しの方向（新しく撮り直しになった方向だけ知らせる）。
+    private var lastRetakeIds: Set<String> = []
     private let saveQueue = DispatchQueue(label: "memoria.capture.save", qos: .userInitiated)
 
     init(sessionId: String, preferredTargetId: String?, store: SessionStore, settings: AppSettings, masks: MaskProcessor, onSessionChanged: @escaping @MainActor () -> Void) {
@@ -80,6 +87,7 @@ final class CaptureController: ObservableObject {
         let session = try? store.loadSession(sessionId)
         let initialPlan = session?.directionPlan ?? DirectionPlanPreset.default.plan
         plan = initialPlan
+        progress = .empty(plan: initialPlan)
         photoCount = session?.photos.count ?? 0
         if let object = session?.object {
             heightCm = min(Self.heightRangeCm.upperBound, max(Self.heightRangeCm.lowerBound, object.heightM * 100))
@@ -258,8 +266,11 @@ final class CaptureController: ObservableObject {
                     s.referenceFrames[i].invalidatedAt = now
                     s.referenceFrames[i].invalidationReason = .userReset
                 }
-                s.referenceFrames.append(ReferenceFrame(id: s.nextReferenceFrameId, createdAt: now, basePointWorld: base))
-                s.object = ObjectSize(heightM: heightM, radiusM: radiusM)
+                // 大きさは基準ごとに残す（前の基準の写真は、前の大きさで切り抜き・確かめをする）。
+                // セッションの object は「最後に設定した大きさ」として前の版のために残す。
+                let size = ObjectSize(heightM: heightM, radiusM: radiusM)
+                s.referenceFrames.append(ReferenceFrame(id: s.nextReferenceFrameId, createdAt: now, basePointWorld: base, object: size))
+                s.object = size
             }
         } catch {
             showBanner("基準を保存できませんでした（\(error.localizedDescription)）", isError: true)
@@ -302,6 +313,8 @@ final class CaptureController: ObservableObject {
         objectToWorld = nil
         referenceState = .none
         covered = []
+        progress = .empty(plan: plan)
+        lastRetakeIds = []
         direction = nil
         if let anchor = baseAnchor { arView.session.remove(anchor: anchor) }
         baseAnchor = nil
@@ -313,7 +326,15 @@ final class CaptureController: ObservableObject {
         }
     }
 
+    /// セッションが変わった（マスクができた・確認画面で変えたなど）。撮影済みの方向を読み直す。
+    func sessionDidChange() {
+        guard isRunning, !captureInFlight else { return }
+        refreshFromStore()
+    }
+
     /// 保存した中身から、撮影済みの方向・正面・枚数を読み直す。
+    /// 方向は、マスクが使える写真があって「そろった」、マスクを作っている間は「確認中」（撮ったとみなす）、
+    /// マスクがうまくいかなければ「撮り直し」（撮っていないとみなす → 自動撮影がまた狙う）。
     private func refreshFromStore() {
         guard let session = try? store.loadSession(sessionId) else { return }
         photoCount = session.photos.count
@@ -321,13 +342,23 @@ final class CaptureController: ObservableObject {
         if let id = activeReferenceId, let reference = session.referenceFrame(id: id), reference.isValid {
             objectToWorld = reference.objectToWorld?.simd
             referenceState = objectToWorld == nil ? .awaitingFront : .ready
-            covered = Coverage.coveredTargetIds(photos: session.photos, referenceFrameId: id)
+            progress = Coverage.progress(in: session, referenceFrameId: id)
         } else {
-            covered = []
+            progress = .empty(plan: plan)
+        }
+        covered = progress.coveredForCapture
+        let retake = progress.retakeIds
+        let newRetakes = retake.subtracting(lastRetakeIds)
+        lastRetakeIds = retake
+        if let first = plan.targets.first(where: { newRetakes.contains($0.id) }) {
+            showBanner("\(DirectionContext.label(first)) の写真の切り抜きがうまくいきませんでした。もう一度撮ります", isError: true)
         }
         pushReference()
         updateMarkers(nextId: direction?.nextTarget?.id, force: true)
     }
+
+    /// すべての方向がそろった（確認中を含まない）。
+    var isComplete: Bool { phase == .capturing && progress.isComplete }
 
     private func pushReference() {
         var reference = LiveReference(plan: plan)
@@ -338,15 +369,17 @@ final class CaptureController: ObservableObject {
         reference.objectToWorld = objectToWorld
         reference.anchorId = baseAnchor?.identifier
         reference.covered = covered
+        reference.retake = progress.retakeIds
         reference.preferredTargetId = preferredTargetId
         processor.reference = reference
     }
 
     private func updateMarkers(nextId: String?, force: Bool = false) {
-        let key = "\(objectToWorld != nil)|\(covered.sorted())|\(nextId ?? "")"
+        let states = Dictionary(uniqueKeysWithValues: progress.targets.map { ($0.target.id, $0.state) })
+        let key = "\(objectToWorld != nil)|\(states.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value.rawValue)" })|\(nextId ?? "")"
         guard force || key != lastMarkerKey else { return }
         lastMarkerKey = key
-        overlay.showMarkers(plan: plan, objectToWorld: objectToWorld, heightM: heightCm / 100, radiusM: radiusCm / 100, covered: covered, nextId: nextId)
+        overlay.showMarkers(plan: plan, objectToWorld: objectToWorld, heightM: heightCm / 100, radiusM: radiusCm / 100, states: states, nextId: nextId)
     }
 
     // MARK: 撮影前の判定
@@ -370,20 +403,43 @@ final class CaptureController: ObservableObject {
         if let center = analysis.normalizedCenter, phase == .capturing {
             focus.focus(at: center)
         }
-        if phase == .capturing, autoCaptureEnabled, assessment.canAutoCapture, !showWarningsSheet {
+        if phase == .capturing, autoCaptureEnabled, assessment.canAutoCapture, !showWarningsSheet, !showNoReferenceDialog {
             capture(trigger: .auto, warningsAcknowledged: false)
         }
     }
 
     // MARK: 撮影
 
-    /// シャッター（手動）。警告があれば先に確認を出す。
+    /// 有効な基準があり、撮影できる状態か。
+    var hasReference: Bool { phase == .capturing && activeReferenceId != nil }
+
+    /// シャッター（手動）。基準が無ければ先に基準を設定するか確かめる。警告があれば確認を出す。
     func shutterTapped() {
-        guard !captureInFlight, assessment.canManualCapture else { return }
-        if assessment.hasWarnings {
-            showWarningsSheet = true
-        } else {
-            capture(trigger: .manual, warningsAcknowledged: false)
+        handleShutter(noReferenceAcknowledged: false)
+    }
+
+    private func handleShutter(noReferenceAcknowledged: Bool) {
+        switch ShutterPolicy.action(hasReference: hasReference, assessment: assessment, captureInFlight: captureInFlight,
+                                    noReferenceAcknowledged: noReferenceAcknowledged) {
+        case .unavailable: break
+        case .confirmNoReference: showNoReferenceDialog = true
+        case .confirmWarnings: showWarningsSheet = true
+        case .capture: capture(trigger: .manual, warningsAcknowledged: false)
+        }
+    }
+
+    /// 基準なしの確認で「このまま撮る」：今までどおり撮る（方向は参考値、切り抜きは写真の全体から）。
+    func captureWithoutReference() {
+        showNoReferenceDialog = false
+        handleShutter(noReferenceAcknowledged: true)
+    }
+
+    /// 基準なしの確認で「基準を設定する」。
+    func setReferenceFromDialog() {
+        showNoReferenceDialog = false
+        switch phase {
+        case .placingBase, .adjustingSize: break  // すでに設定している
+        default: beginPlacingBase()
         }
     }
 
@@ -397,6 +453,8 @@ final class CaptureController: ObservableObject {
         // 撮影は 1 枚ずつ。撮っている間の要求は無視する。
         guard isRunning, !captureInFlight else { return }
         guard assessment.canManualCapture || trigger == .auto else { return }
+        // 自動撮影は、正面が決まった有効な基準があるときだけ（基準なしでは撮らない）。
+        guard trigger == .manual || (hasReference && referenceState == .ready) else { return }
         captureInFlight = true
         let context = CaptureContext(
             trigger: trigger,

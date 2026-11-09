@@ -127,7 +127,9 @@ public enum MaskCropPlanner {
 
     /// 写真の姿勢で作品の円柱を投影する（保存した写真のピクセル）。基準・大きさが無い、作品がカメラの後ろなら nil。
     public static func projectObject(photo: Photo, session: CaptureSession) -> ProjectedObject? {
-        guard let reference = session.referenceFrame(id: photo.referenceFrameId), let size = session.object else { return nil }
+        // 写真を撮ったときの基準の大きさを使う（基準を設定し直すとセッションの大きさは変わるため）。
+        guard let reference = session.referenceFrame(id: photo.referenceFrameId),
+              let size = session.objectSize(referenceFrameId: photo.referenceFrameId) else { return nil }
         let k = photo.camera.intrinsicsResolution
         let camera = CameraModel(
             cameraToWorld: photo.camera.cameraToWorld.simd, intrinsics: photo.camera.intrinsics.simd,

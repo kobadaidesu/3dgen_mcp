@@ -49,6 +49,8 @@ struct LiveReference: Sendable {
     var anchorId: UUID?
     var plan: DirectionPlan
     var covered: Set<String> = []
+    /// 撮り直しが要る方向（`covered` に入らない）。
+    var retake: Set<String> = []
     var preferredTargetId: String?
 }
 
@@ -185,7 +187,7 @@ final class ARFrameProcessor: NSObject, ARSessionDelegate, @unchecked Sendable {
                 direction = DirectionContext.make(
                     cameraPosition: transform.translation, basePoint: base, heightM: ref.heightM,
                     objectToWorld: ref.objectToWorld, plan: ref.plan, covered: ref.covered,
-                    preferredTargetId: ref.preferredTargetId
+                    preferredTargetId: ref.preferredTargetId, retake: ref.retake
                 )
             }
             let sample = LiveFrameSample(

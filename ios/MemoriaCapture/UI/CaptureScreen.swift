@@ -121,6 +121,14 @@ struct CaptureView: View {
         .onChange(of: controller.autoCaptureEnabled) { _, enabled in
             model.settings.autoCaptureEnabled = enabled
         }
+        .onChange(of: model.revision) { _, _ in controller.sessionDidChange() }
+        .alert("基準が未設定です", isPresented: $controller.showNoReferenceDialog) {
+            Button("基準を設定する") { controller.setReferenceFromDialog() }
+                .keyboardShortcut(.defaultAction)
+            Button("このまま撮る") { controller.captureWithoutReference() }
+        } message: {
+            Text("基準が未設定です。方向が記録されず、切り抜きも不正確になります")
+        }
         .confirmationDialog("気になる点があります", isPresented: $controller.showWarningsSheet, titleVisibility: .visible) {
             Button("このまま撮る") { controller.captureAcknowledgingWarnings() }
             Button("やめる", role: .cancel) {}

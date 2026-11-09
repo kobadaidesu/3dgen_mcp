@@ -137,6 +137,17 @@ struct PhotoDetailView: View {
             Text(directionText(photo)).font(.subheadline)
             Text("切り抜き：\(MaskBadge.label(photo.mask.status))\(photo.mask.selection == .user ? "（選び直し）" : "")\(photo.mask.error.map { "・\($0)" } ?? "")")
                 .font(.subheadline)
+            if photo.mask.status.hasFile, let check = photo.mask.check {
+                switch check.status {
+                case .ok:
+                    Text("切り抜きの確認：作品の位置と合っています").font(.caption).foregroundStyle(.secondary)
+                case .suspicious:
+                    Text("切り抜きの確認：作品ではない物を選んでいるかもしれません（\(check.reasons.map(\.label).joined(separator: "・"))）")
+                        .font(.caption).foregroundStyle(.orange)
+                case .unknown:
+                    Text("切り抜きの確認：作品の位置が分からないため確かめていません").font(.caption).foregroundStyle(.secondary)
+                }
+            }
             if let source = photo.mask.inputRegionSource {
                 Text(source == .projectedCylinder ? "作品のまわりを切り抜いて作りました" : "写真の全体から作りました（作品の位置が分からないため）")
                     .font(.caption).foregroundStyle(.secondary)

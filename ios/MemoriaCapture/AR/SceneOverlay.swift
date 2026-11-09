@@ -16,7 +16,9 @@ final class SceneOverlay {
     private var markerNodes: [String: SCNNode] = [:]
 
     static let coveredColor = UIColor.systemGreen
-    static let nextColor = UIColor.systemOrange
+    static let checkingColor = UIColor.systemYellow
+    static let retakeColor = UIColor.systemOrange
+    static let nextColor = UIColor.systemCyan
     static let pendingColor = UIColor.white
 
     init() {
@@ -86,7 +88,8 @@ final class SceneOverlay {
     }
 
     /// 撮る方向の印。正面が決まるまでは出さない。
-    func showMarkers(plan: DirectionPlan, objectToWorld: simd_double4x4?, heightM: Double, radiusM: Double, covered: Set<String>, nextId: String?) {
+    /// 色：そろった＝緑、確認中＝黄、撮り直し＝オレンジ、次に撮る方向＝水色（大きく）、未撮影＝白。
+    func showMarkers(plan: DirectionPlan, objectToWorld: simd_double4x4?, heightM: Double, radiusM: Double, states: [String: TargetState], nextId: String?) {
         guard let objectToWorld else {
             markers.isHidden = true
             return
@@ -110,7 +113,13 @@ final class SceneOverlay {
             let local = center + distance * SIMD3(sin(az) * cos(el), sin(el), cos(az) * cos(el))
             let world = objectToWorld * SIMD4(local, 1)
             node.simdPosition = SIMD3(Float(world.x), Float(world.y), Float(world.z))
-            let color: UIColor = covered.contains(target.id) ? Self.coveredColor : (target.id == nextId ? Self.nextColor : Self.pendingColor)
+            let color: UIColor
+            switch states[target.id] ?? .notShot {
+            case .done: color = Self.coveredColor
+            case .checking: color = Self.checkingColor
+            case .retake: color = Self.retakeColor
+            case .notShot: color = target.id == nextId ? Self.nextColor : Self.pendingColor
+            }
             node.geometry?.firstMaterial?.diffuse.contents = color
             node.scale = target.id == nextId ? SCNVector3(1.5, 1.5, 1.5) : SCNVector3(1, 1, 1)
         }
