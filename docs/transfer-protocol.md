@@ -61,6 +61,7 @@ captures/
     _receipt.json                 {"complete": true, "manifestHash", "receivedAt", "files": [...]}
     upright/photos/*.jpg          表示用にまっすぐに回したコピー（K は合わない。sips があるときだけ）
     upright/masks/*.png
+  for_claude/<sessionId>/         AI ツール向けの入力（受信のあとに tools/claude-pack の memoria-pack が作る派生データ。ビルドしてあるときだけ）
   incoming/<sessionId>/<uploadId>/  転送中（生成用のデータとして使わない）
   replaced/<sessionId>-<時刻>/      同じセッションを送り直したときの前の版
 ```

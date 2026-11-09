@@ -106,7 +106,7 @@ class ReceiverTestCase(unittest.TestCase):
     def setUp(self):
         self.data_dir = Path(tempfile.mkdtemp(prefix="memoria-data-")).resolve()
         identity = {"receiverId": new_id(), "pairingCode": "123456", "name": "テストの Mac"}
-        self.receiver = mr.Receiver(self.data_dir, identity)
+        self.receiver = mr.Receiver(self.data_dir, identity, pack_path=None)  # PackHookTests turn the hook on
         self.out = io.StringIO()
         with redirect_stdout(self.out):
             self.receiver.prepare()
@@ -683,6 +683,96 @@ class UprightTests(ReceiverTestCase):
         cap = Capture()
         self.send(cap)
         self.assertFalse((self.published(cap) / "upright").exists())
+
+
+class PackHookTests(ReceiverTestCase):
+    """After a commit the receiver runs tools/claude-pack's memoria-pack in the background (mocked by a script)."""
+
+    def setUp(self):
+        super().setUp()
+        self.tools = Path(tempfile.mkdtemp(prefix="memoria-pack-mock-"))
+        self.calls = self.tools / "calls.txt"
+
+    def tearDown(self):
+        super().tearDown()
+        shutil.rmtree(str(self.tools), ignore_errors=True)
+
+    def mock(self, body):
+        script = self.tools / "memoria-pack"
+        script.write_text("#!/bin/sh\necho \"$@\" >> '%s'\n%s\n" % (self.calls, body), "utf-8")
+        script.chmod(0o755)
+        self.receiver.pack_path = str(script)
+        return script
+
+    def wait_for(self, predicate, timeout=10.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_runs_pack_after_commit_with_data_dir(self):
+        self.mock('echo "[pack] done"')
+        cap = Capture()
+        self.send(cap)
+        self.assertTrue(self.wait_for(lambda: "[for_claude] [pack] done" in self.out.getvalue()), self.out.getvalue())
+        self.assertEqual(self.calls.read_text("utf-8").strip(), "%s --data-dir %s" % (cap.sid, self.data_dir))
+
+    def test_repeated_commit_does_not_run_again(self):
+        self.mock('echo ok')
+        cap = Capture()
+        upload_id, _ = self.send(cap)
+        self.assertTrue(self.wait_for(lambda: self.calls.exists()))
+        status, body = self.commit(cap, upload_id)  # already complete: same answer, no new pack run
+        self.assertEqual((status, body["status"]), (200, "complete"))
+        time.sleep(0.3)
+        self.assertEqual(len(self.calls.read_text("utf-8").splitlines()), 1)
+
+    def test_failure_is_one_log_line_and_commit_succeeds(self):
+        self.mock('echo "error: something broke" >&2\nexit 1')
+        cap = Capture()
+        _, body = self.send(cap)
+        self.assertEqual(body["status"], "complete")
+        self.assertTrue(self.wait_for(lambda: "for_claude/ を作れませんでした" in self.out.getvalue()))
+        lines = [l for l in self.out.getvalue().splitlines() if "for_claude" in l]
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("error: something broke", lines[0])
+        self.assertIn("終了コード 1", lines[0])
+        self.assertTrue(self.published(cap).is_dir())
+
+    def test_commit_does_not_wait_for_the_pack(self):
+        self.mock("sleep 2\necho finished")
+        cap = Capture()
+        upload_id = self.upload_all(cap)
+        started = time.time()
+        status, body = self.commit(cap, upload_id)
+        self.assertEqual((status, body["status"]), (200, "complete"))
+        self.assertLess(time.time() - started, 1.5)
+        # let the background run finish before the temporary folders go away
+        self.assertTrue(self.wait_for(lambda: "[for_claude] finished" in self.out.getvalue()))
+
+    def test_missing_binary_prints_build_hint_once(self):
+        self.receiver.pack_path = str(self.tools / "not-built" / "memoria-pack")
+        self.send(Capture())
+        self.send(Capture())
+        hints = [l for l in self.out.getvalue().splitlines() if "swift build -c release" in l]
+        self.assertEqual(len(hints), 1, self.out.getvalue())
+        self.assertIn("tools/claude-pack", hints[0])
+
+    def test_hook_off(self):
+        self.receiver.pack_path = None
+        self.send(Capture())
+        self.assertNotIn("for_claude", self.out.getvalue())
+        self.assertNotIn("swift build", self.out.getvalue())
+
+    def test_default_path_points_at_the_release_build(self):
+        r = mr.Receiver(self.data_dir, {"receiverId": new_id(), "pairingCode": "123456", "name": "x"})
+        self.assertEqual(Path(r.pack_path), mr.REPO_DIR / "tools" / "claude-pack" / ".build" / "release" / "memoria-pack")
+
+    def test_data_readme_points_ai_tools_at_for_claude(self):
+        readme = (self.data_dir / "README.md").read_text("utf-8")
+        self.assertIn("for_claude/<sessionId>/brief.md", readme)
 
 
 if __name__ == "__main__":

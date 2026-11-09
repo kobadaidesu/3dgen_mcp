@@ -48,6 +48,16 @@ python3 receiver/memoria_receiver.py list
 python3 receiver/memoria_receiver.py show <sessionId の先頭>
 ```
 
+## AI ツール向けの入力（`captures/for_claude/`）
+
+Claude Code などの AI ツールで作品の 3D モデルを作るときの入口は **`captures/for_claude/<sessionId>/brief.md`** です。向きをそろえて切り抜いた代表の写真（`views/`）、一覧の画像（`overview.jpg`）、visual hull で測った実寸（`measurements.json`）、粗い形（`hull.obj`）が入っています。作り方と中身は [tools/claude-pack/README.md](../tools/claude-pack/README.md)。
+
+- 受信サーバーは、セッションを受け取る（commit が完了する）たびに `tools/claude-pack/.build/release/memoria-pack` があれば裏で動かします。受信の応答は待たせず、失敗しても受信には影響しません（ログに `[警告] for_claude/ を作れませんでした…` を 1 行）。成功すると `[for_claude] …` を 1 行出します。
+- ビルドしていないときは、最初の受信で一度だけ作り方を表示します：`cd tools/claude-pack && swift build -c release`。
+- 同じセッションをもう一度 commit しても（すでに完了している）作り直しません。送り直して manifestHash が変わると作り直します。
+- `for_claude/` は `sessions/` から作った派生データです。消しても `memoria-pack <sessionId の先頭>` で作り直せます。
+- 画像を Claude などのクラウドのツールに渡すことは外部への送信です。するかどうかはユーザーが決めます。
+
 ## テスト
 
 ```sh
@@ -56,4 +66,4 @@ cd receiver && python3 -m unittest -v
 python3 -m unittest discover -s receiver/tests -v
 ```
 
-サーバーを同じプロセスで空いているポートに立て、一時フォルダに受け取ります（Bonjour は使いません）。`sips` が無い環境では、回転したプレビューのテストだけ飛ばします。
+サーバーを同じプロセスで空いているポートに立て、一時フォルダに受け取ります（Bonjour は使いません）。`sips` が無い環境では、回転したプレビューのテストだけ飛ばします。`for_claude/` を作る処理は、本物の `memoria-pack` の代わりに小さなシェルスクリプトで確かめます（ほかのテストでは動かさない）。

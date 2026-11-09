@@ -59,7 +59,11 @@ AUTH_FAIL_LIMIT = 20  # failed tokens per client IP within AUTH_FAIL_WINDOW -> 4
 AUTH_FAIL_WINDOW = 300.0
 SIPS_PATH = "/usr/bin/sips"
 
-DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "captures"
+REPO_DIR = Path(__file__).resolve().parent.parent
+DEFAULT_DATA_DIR = REPO_DIR / "captures"
+# tools/claude-pack (memoria-pack) builds captures/for_claude/<sessionId>/ for AI tools after each commit.
+PACK_PATH = REPO_DIR / "tools" / "claude-pack" / ".build" / "release" / "memoria-pack"
+PACK_TIMEOUT = 600.0
 
 # Same-network only (docs/transfer-protocol.md「同じネットワークの中だけ」): by default the receiver
 # accepts connections only from these ranges and closes every other connection before reading anything.
@@ -410,11 +414,17 @@ def scan_incoming(data_dir: Path):
 
 
 class Receiver:
-    def __init__(self, data_dir: Path, identity: dict, fail_put_every: int = 0, sips_path: str = SIPS_PATH):
+    def __init__(self, data_dir: Path, identity: dict, fail_put_every: int = 0, sips_path: str = SIPS_PATH,
+                 pack_path="default"):
         self.data_dir = Path(data_dir).resolve()
         self.identity = identity
         self.fail_put_every = fail_put_every
         self.sips_path = sips_path
+        # None disables the for_claude/ hook (tests); a missing binary prints a build hint once.
+        self.pack_path = str(PACK_PATH) if pack_path == "default" else pack_path
+        self._pack_hint_shown = False
+        self._pack_locks = {}
+        self._pack_guard = threading.Lock()
         self.sessions_dir = self.data_dir / "sessions"
         self.incoming_dir = self.data_dir / "incoming"
         self.replaced_dir = self.data_dir / "replaced"
@@ -644,7 +654,51 @@ class Receiver:
                     del self._hash_cache[key]
         self.rebuild_index()
         log("[完了] %s を受け取りました（%d ファイル）→ %s" % (session_id, len(entries), dest))
+        self.start_pack(session_id)
         return {"status": "complete", "manifestHash": upload_id, "path": str(dest)}
+
+    # -- for_claude/ (memoria-pack) --------------------------------------------
+
+    def start_pack(self, session_id: str):
+        """Builds captures/for_claude/<sessionId>/ in the background. Never raises, never blocks the commit.
+
+        Returns the thread (or None when the hook is off or the binary is not built)."""
+        try:
+            path = self.pack_path
+            if not path:
+                return None
+            if not (os.path.isfile(path) and os.access(path, os.X_OK)):
+                if not self._pack_hint_shown:
+                    self._pack_hint_shown = True
+                    log("[ヒント] AI ツール向けの入力（for_claude/）を自動で作るには、一度ビルドしてください: "
+                        "cd tools/claude-pack && swift build -c release")
+                return None
+            thread = threading.Thread(target=self._run_pack, args=(path, session_id),
+                                      name="memoria-pack-%s" % session_id[:8], daemon=True)
+            thread.start()
+            return thread
+        except Exception as e:  # noqa: BLE001 - the hook must never affect the commit
+            log("[警告] for_claude/ の作成を始められませんでした（%s）: %s" % (session_id, e))
+            return None
+
+    def _run_pack(self, path: str, session_id: str) -> None:
+        with self._pack_guard:
+            lock = self._pack_locks.setdefault(session_id, threading.Lock())
+        with lock:  # one run per session at a time (a resend while packing waits, then rebuilds)
+            try:
+                result = subprocess.run([path, session_id, "--data-dir", str(self.data_dir)],
+                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=PACK_TIMEOUT)
+                lines = [l for l in result.stdout.decode("utf-8", "replace").splitlines() if l.strip()]
+                if result.returncode == 0:
+                    log("[for_claude] %s" % (lines[-1] if lines else session_id))
+                else:
+                    detail = " / ".join(l.strip() for l in lines if "error" in l.lower()) or (lines[-1] if lines else "")
+                    log("[警告] for_claude/ を作れませんでした（%s、終了コード %d）: %s"
+                        % (session_id, result.returncode, detail[-300:]))
+            except subprocess.TimeoutExpired:
+                log("[警告] for_claude/ の作成が %d 秒で終わりませんでした（%s）" % (PACK_TIMEOUT, session_id))
+            except Exception as e:  # noqa: BLE001
+                log("[警告] for_claude/ を作れませんでした（%s）: %s" % (session_id, e))
 
     def _publish(self, session_id: str, staging: Path, dest: Path) -> None:
         moved_old = None
@@ -1155,15 +1209,34 @@ iPhone のアプリから同じネットワーク（自宅の LAN・USB ケー�
 
 ## どこを使うか
 
+**AI ツール（Claude Code など）で作品の 3D モデルを作るときは、まず `for_claude/<sessionId>/brief.md` を読んでください。**
+向きをそろえて切り抜いた代表の写真・一覧の画像・実寸・粗い形がまとめてあります（`sessions/` から作った派生データ）。
+
 | 場所 | 中身 | 使ってよいか |
 |---|---|---|
-| `sessions/<sessionId>/` | 全部のファイルが届き、ハッシュと session.json を確かめ終わったセッション | **使うのはここだけ** |
+| `for_claude/<sessionId>/` | AI ツール向けの入力（`brief.md`・`overview.jpg`・`views/`・`measurements.json`・`hull.obj`・`pack.json`）。受信のたびに `tools/claude-pack` の `memoria-pack` が作り直す（ビルドしてあるときだけ） | **AI ツールの入口はここ**。読むだけ（作り直すと置き換わる） |
+| `sessions/<sessionId>/` | 全部のファイルが届き、ハッシュと session.json を確かめ終わったセッション | 元のデータ。**書き込まない**（計算に使うのはここだけ） |
 | `index.json` | `sessions/` の一覧（sessionId・title・photoCount・maskCount（mask.status ごとの数）・receivedAt・manifestHash・path） | 一覧を見るのに使う |
 | `incoming/` | 転送の途中。ファイルが欠けていたり、確かめる前だったりする | **使わない・読まない・消さない**（受信サーバーが使う） |
 | `replaced/<sessionId>-<UTC 時刻>/` | 同じセッションを撮り直して送り直したときの前の版 | 前の版が要るときだけ |
 | `.receiver.json` | 受信機の ID とペアリングコード | 触らない（秘密の値を含む） |
 
 一覧は `python3 receiver/memoria_receiver.py list`、1 つのセッションの中身は `python3 receiver/memoria_receiver.py show <sessionId の先頭>` で見られます。
+
+## AI ツール向けの入力（`for_claude/<sessionId>/`）
+
+```
+brief.md            最初に読む説明（作品名・実寸と誤差・座標の決まり・写真の一覧・撮れていない範囲・使い方）
+overview.jpg        選んだ写真の一覧（カメラの位置に並べ、上から見た配置で正面が下）と実寸
+views/<向き>.jpg     代表の写真をまっすぐに回し、作品のまわりで切り抜いたもの（長い辺 1568 px 以下）
+views/<向き>_cutout.jpg  同じ範囲で作品だけを残し、背景を灰色にしたもの
+measurements.json   visual hull で測った実寸（幅 X・奥行き Z・高さ Y、誤差、推定した机の面）
+hull.obj            粗い形（メートル、+Y が上、+Z が正面、y = 0 が机の面）
+pack.json           写真の選び方・出どころ（sessionId・manifestHash）
+```
+
+向き：front・front_right・right・back_right・back・back_left・left・front_left（低い段）、top（一番高い写真）、front_high。
+手で作り直すときは `tools/claude-pack/.build/release/memoria-pack <sessionId の先頭> --force`。
 
 ## 1 つのセッションの中身（`sessions/<sessionId>/`）
 
