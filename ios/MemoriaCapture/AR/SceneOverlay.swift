@@ -14,6 +14,11 @@ final class SceneOverlay {
     private let cylinder = SCNNode()
     private let markers = SCNNode()
     private var markerNodes: [String: SCNNode] = [:]
+    /// 見つかった水平の平面（底の中心を探している間だけ出す）。
+    private let planes = SCNNode()
+    private var planeNodes: [UUID: SCNNode] = [:]
+    private let planeMaterials = SceneOverlay.planeMaterials(.white)
+    private let activePlaneMaterials = SceneOverlay.planeMaterials(.systemYellow)
 
     static let coveredColor = UIColor.systemGreen
     static let checkingColor = UIColor.systemYellow
@@ -39,6 +44,7 @@ final class SceneOverlay {
         objectNode.isHidden = true
         markers.isHidden = true
 
+        root.addChildNode(planes)
         root.addChildNode(reticle)
         root.addChildNode(objectNode)
         root.addChildNode(markers)
@@ -146,5 +152,76 @@ final class SceneOverlay {
     func hideObject() {
         objectNode.isHidden = true
         markers.isHidden = true
+    }
+
+    // MARK: 見つかった平面
+
+    /// 見つかった水平の平面に、薄い格子と縁を出す。照準が当たっている平面（`highlightedId`）は黄色にする。
+    /// 形は `refreshGeometry` のときだけ作り直す（毎回作ると重いため）。無くなった平面の印は消す。
+    func showPlanes(_ anchors: [ARPlaneAnchor], highlightedId: UUID?, refreshGeometry: Bool) {
+        let ids = Set(anchors.map(\.identifier))
+        for (id, node) in planeNodes where !ids.contains(id) {
+            node.removeFromParentNode()
+            planeNodes[id] = nil
+        }
+        for anchor in anchors {
+            let node: SCNNode
+            if let existing = planeNodes[anchor.identifier] {
+                node = existing
+                if refreshGeometry { node.geometry = Self.planeGeometry(anchor.geometry) }
+            } else {
+                node = SCNNode(geometry: Self.planeGeometry(anchor.geometry))
+                // 照準より先に描き、深度は書かない（照準と同じ高さでちらつかないように）。
+                node.renderingOrder = -10
+                planes.addChildNode(node)
+                planeNodes[anchor.identifier] = node
+            }
+            node.simdTransform = anchor.transform
+            node.geometry?.materials = anchor.identifier == highlightedId ? activePlaneMaterials : planeMaterials
+        }
+    }
+
+    func hidePlanes() {
+        for node in planeNodes.values { node.removeFromParentNode() }
+        planeNodes = [:]
+    }
+
+    /// 格子の間隔（m）。
+    private static let gridSpacing: Float = 0.1
+
+    /// 平面の形（アンカーの座標）。面（格子）と縁の線の 2 つ。
+    private static func planeGeometry(_ plane: ARPlaneGeometry) -> SCNGeometry {
+        let points = plane.vertices + plane.boundaryVertices
+        let vertices = SCNGeometrySource(vertices: points.map { SCNVector3($0) })
+        let uv = SCNGeometrySource(textureCoordinates: points.map {
+            CGPoint(x: CGFloat($0.x / gridSpacing), y: CGFloat($0.z / gridSpacing))
+        })
+        let fill = SCNGeometryElement(indices: plane.triangleIndices.map { Int32($0) }, primitiveType: .triangles)
+        let offset = Int32(plane.vertices.count), count = Int32(plane.boundaryVertices.count)
+        var lineIndices: [Int32] = []
+        if count >= 2 {
+            for i in 0..<count { lineIndices += [offset + i, offset + (i + 1) % count] }
+        }
+        let outline = SCNGeometryElement(indices: lineIndices, primitiveType: .line)
+        return SCNGeometry(sources: [vertices, uv], elements: [fill, outline])
+    }
+
+    /// 面（格子）と縁の材質。
+    private static func planeMaterials(_ color: UIColor) -> [SCNMaterial] {
+        let size = CGSize(width: 64, height: 64)
+        let grid = UIGraphicsImageRenderer(size: size).image { context in
+            color.withAlphaComponent(0.08).setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            color.withAlphaComponent(0.45).setFill()
+            context.fill(CGRect(x: 0, y: 0, width: size.width, height: 2))
+            context.fill(CGRect(x: 0, y: 0, width: 2, height: size.height))
+        }
+        let fill = material(.white, writesDepth: false)
+        fill.diffuse.contents = grid
+        fill.diffuse.wrapS = .repeat
+        fill.diffuse.wrapT = .repeat
+        fill.diffuse.mipFilter = .linear
+        let outline = material(color.withAlphaComponent(0.8), writesDepth: false)
+        return [fill, outline]
     }
 }

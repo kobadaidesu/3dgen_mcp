@@ -95,13 +95,20 @@ struct CaptureOverlay: View {
     }
 
     private var guidance: some View {
-        Text(controller.guidanceText)
-            .font(.headline)
-            .multilineTextAlignment(.center)
-            .padding(.horizontal, 14).padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
-            .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
-            .foregroundStyle(.white)
+        VStack(spacing: 6) {
+            Text(controller.guidanceText)
+                .font(.headline)
+            if let tip = controller.guidanceTip {
+                Label(tip, systemImage: "lightbulb.fill")
+                    .font(.caption)
+                    .foregroundStyle(.yellow)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .frame(maxWidth: .infinity)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
+        .foregroundStyle(.white)
     }
 
     // MARK: 下：操作

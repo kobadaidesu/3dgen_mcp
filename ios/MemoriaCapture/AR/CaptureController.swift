@@ -25,8 +25,21 @@ final class CaptureController: ObservableObject {
         let isError: Bool
     }
 
+    /// 照準がどの方法で平面に当たったか（見つかった平面を延ばした面・見つかった平面の形・推定した平面）。
+    enum ReticleSource: Equatable {
+        case existingPlaneInfinite
+        case existingPlaneGeometry
+        case estimatedPlane
+    }
+
     @Published private(set) var phase: Phase = .starting
     @Published private(set) var hasPlaneHit = false
+    /// カメラより下に水平の平面が 1 つ以上見つかっている（底の中心を探している間）。
+    @Published private(set) var hasDetectedPlane = false
+    /// 照準が当たった方法（当たっていなければ nil）。
+    @Published private(set) var reticleSource: ReticleSource?
+    /// 平面が見つからないまま時間がたった（白い机のこつを出す）。
+    @Published private(set) var showPlaneTip = false
     @Published var heightCm: Double = 15 { didSet { updateObjectPreview() } }
     @Published var radiusCm: Double = 8 { didSet { updateObjectPreview() } }
     @Published private(set) var assessment = QualityAssessment.initial
@@ -70,6 +83,18 @@ final class CaptureController: ObservableObject {
     private var baseAnchor: ARAnchor?
     private var lastHit: SIMD3<Double>?
     private var reticleTimer: Timer?
+    /// 照準の位置（少しならす）。最後に当たった時刻から `reticleHoldSeconds` の間は、外れても残す。
+    private var smoothedHit: SIMD3<Float>?
+    private var lastHitTime: TimeInterval = 0
+    /// 照準が当たっている平面のアンカー（格子を黄色にする）。
+    private var targetPlaneId: UUID?
+    private var reticleTick = 0
+    private var placingStartedAt: TimeInterval = 0
+    /// この基準の設定で、平面が一度でも見つかった（見つかったら案内の動画は二度と出さない）。
+    private var planeEverFound = false
+    /// この基準の設定で、案内の動画を一度出した（自分で閉じたあとに出し直して、ちらつかないように）。
+    private var coachingStarted = false
+    private let coaching = ARCoachingOverlayView()
     private var lastSampleTimestamp: Double = 0
     private var isRunning = false
     private var wasBackgrounded = false
@@ -109,6 +134,14 @@ final class CaptureController: ObservableObject {
         arView.session.delegateQueue = processor.delegateQueue
         arView.session.delegate = processor
         overlay.attach(to: arView)
+        // 平面を探すときの Apple の案内（動画）。出し入れはこちらで決める。下のボタンは SwiftUI の層で、この上にある。
+        coaching.session = arView.session
+        coaching.goal = .horizontalPlane
+        coaching.activatesAutomatically = false
+        coaching.isUserInteractionEnabled = false
+        coaching.frame = arView.bounds
+        coaching.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        arView.addSubview(coaching)
 
         processor.onAnalysis = { [weak self] in self?.handle($0) }
         processor.onReferenceLost = { [weak self] reason in
@@ -217,9 +250,12 @@ final class CaptureController: ObservableObject {
         guard isRunning else { return }
         phase = .placingBase
         basePoint = nil
-        hasPlaneHit = false
         overlay.hideObject()
         stopReticle()
+        placingStartedAt = CACurrentMediaTime()
+        planeEverFound = false
+        coachingStarted = false
+        reticleTick = 0
         reticleTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.updateReticle() }
         }
@@ -229,22 +265,134 @@ final class CaptureController: ObservableObject {
         reticleTimer?.invalidate()
         reticleTimer = nil
         overlay.showReticle(at: nil)
+        overlay.hidePlanes()
+        setCoaching(active: false)
+        smoothedHit = nil
+        lastHit = nil
+        targetPlaneId = nil
+        set(\.hasPlaneHit, false)
+        set(\.hasDetectedPlane, false)
+        set(\.reticleSource, nil)
+        set(\.showPlaneTip, false)
     }
 
+    /// 照準を外れても残す時間（秒）。ちらつかないように。
+    private static let reticleHoldSeconds: TimeInterval = 0.5
+    /// これより近い位置へ動いたときだけならす（離れたら、すぐそこへ移す）。
+    private static let reticleSmoothingRadius: Float = 0.05
+    private static let reticleSmoothing: Float = 0.35
+    /// 見つかった平面を延ばして使うのは、平面の縁からこの距離まで（机の平面を延ばした面が、机の外の床を指したときに当たらないように）。
+    private static let infinitePlaneMargin: Float = 0.6
+    /// 平面が見つからないまま、この時間（秒）がたったら白い机のこつを出す。
+    private static let planeTipDelay: TimeInterval = 15
+
     private func updateReticle() {
-        guard phase == .placingBase, arView.bounds.width > 0 else { return }
+        guard phase == .placingBase, arView.bounds.width > 0, let frame = arView.session.currentFrame else { return }
+        let now = CACurrentMediaTime()
+        let c = frame.camera.transform.columns.3
+        let camera = SIMD3<Float>(c.x, c.y, c.z)
+        let cameraY = camera.y
+        // カメラより下の水平の平面（机・床）。天井や、カメラより上の面は使わない。
+        let planes = frame.anchors.compactMap { $0 as? ARPlaneAnchor }
+            .filter { $0.alignment == .horizontal && $0.transform.columns.3.y < cameraY }
+        if !planes.isEmpty { planeEverFound = true }
+
         let center = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
-        if let query = arView.raycastQuery(from: center, allowing: .estimatedPlane, alignment: .horizontal),
-           let result = arView.session.raycast(query).first {
-            let p = result.worldTransform.columns.3
+        if let hit = raycastBase(from: center, camera: camera) {
+            if let s = smoothedHit, simd_distance(s, hit.position) < Self.reticleSmoothingRadius {
+                smoothedHit = s + Self.reticleSmoothing * (hit.position - s)
+            } else {
+                smoothedHit = hit.position
+            }
+            lastHitTime = now
+            targetPlaneId = hit.planeId
+            set(\.reticleSource, hit.source)
+        } else if now - lastHitTime > Self.reticleHoldSeconds {
+            smoothedHit = nil
+            targetPlaneId = nil
+            set(\.reticleSource, nil)
+        }
+
+        if let p = smoothedHit {
             lastHit = SIMD3(Double(cleaning: p.x), Double(cleaning: p.y), Double(cleaning: p.z))
-            overlay.showReticle(at: result.worldTransform)
-            hasPlaneHit = true
+            var transform = matrix_identity_float4x4
+            transform.columns.3 = SIMD4(p, 1)
+            overlay.showReticle(at: transform)
         } else {
             lastHit = nil
             overlay.showReticle(at: nil)
-            hasPlaneHit = false
         }
+        overlay.showPlanes(planes, highlightedId: targetPlaneId, refreshGeometry: reticleTick % 4 == 0)
+        reticleTick += 1
+
+        set(\.hasPlaneHit, lastHit != nil)
+        set(\.hasDetectedPlane, !planes.isEmpty)
+        set(\.showPlaneTip, !planeEverFound && now - placingStartedAt >= Self.planeTipDelay)
+        if planeEverFound {
+            setCoaching(active: false)
+        } else if !coachingStarted {
+            coachingStarted = true
+            setCoaching(active: true)
+        }
+    }
+
+    private struct BaseHit {
+        let position: SIMD3<Float>
+        let source: ReticleSource
+        let planeId: UUID?
+    }
+
+    /// 画面の点から、作品の底を置く水平の面を探す。
+    /// 1. 見つかった平面を延ばした面（作品の下で模様が無くても、机の高さがそのまま分かる）
+    /// 2. 見つかった平面の形
+    /// 3. 推定した平面
+    /// それぞれ、カメラより下で一番近い当たりを使う（床と机が両方あれば、手前の机）。
+    private func raycastBase(from point: CGPoint, camera: SIMD3<Float>) -> BaseHit? {
+        let chain: [(ARRaycastQuery.Target, ReticleSource)] = [
+            (.existingPlaneInfinite, .existingPlaneInfinite),
+            (.existingPlaneGeometry, .existingPlaneGeometry),
+            (.estimatedPlane, .estimatedPlane),
+        ]
+        for (target, source) in chain {
+            guard let query = arView.raycastQuery(from: point, allowing: target, alignment: .horizontal) else { continue }
+            let hits = arView.session.raycast(query).map { result -> (SIMD3<Float>, ARRaycastResult) in
+                let c = result.worldTransform.columns.3
+                return (SIMD3(c.x, c.y, c.z), result)
+            }
+            for (position, result) in hits.sorted(by: { simd_distance($0.0, camera) < simd_distance($1.0, camera) }) {
+                guard position.x.isFinite, position.y.isFinite, position.z.isFinite, position.y < camera.y else { continue }
+                if target == .existingPlaneInfinite {
+                    guard let plane = result.anchor as? ARPlaneAnchor,
+                          Self.isNear(plane, worldPoint: position, margin: Self.infinitePlaneMargin) else { continue }
+                }
+                return BaseHit(position: position, source: source, planeId: (result.anchor as? ARPlaneAnchor)?.identifier)
+            }
+        }
+        return nil
+    }
+
+    /// 点が、平面の縁（アンカーの座標で縁の点を囲む四角）から `margin` 以内か。
+    private static func isNear(_ plane: ARPlaneAnchor, worldPoint: SIMD3<Float>, margin: Float) -> Bool {
+        let boundary = plane.geometry.boundaryVertices
+        guard !boundary.isEmpty else { return false }
+        let local = simd_mul(simd_inverse(plane.transform), SIMD4(worldPoint, 1))
+        var minX = Float.infinity, maxX = -Float.infinity, minZ = Float.infinity, maxZ = -Float.infinity
+        for v in boundary {
+            minX = min(minX, v.x); maxX = max(maxX, v.x)
+            minZ = min(minZ, v.z); maxZ = max(maxZ, v.z)
+        }
+        return local.x >= minX - margin && local.x <= maxX + margin && local.z >= minZ - margin && local.z <= maxZ + margin
+    }
+
+    /// 平面を探す案内の動画を出す・しまう（同じ状態なら何もしない）。
+    private func setCoaching(active: Bool) {
+        guard coaching.isActive != active else { return }
+        coaching.setActive(active, animated: true)
+    }
+
+    /// 値が変わったときだけ書く（毎秒 20 回の更新で、画面を毎回描き直さないように）。
+    private func set<T: Equatable>(_ keyPath: ReferenceWritableKeyPath<CaptureController, T>, _ value: T) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
     }
 
     /// 「ここが底の中心」
@@ -591,11 +739,18 @@ final class CaptureController: ObservableObject {
         case .starting: return "カメラを準備しています"
         case .unsupported(let message), .failed(let message): return message
         case .placingBase:
-            return hasPlaneHit ? "黄色い印を作品の底の中心に合わせて「ここが底の中心」を押してください"
-                : "作品を置いた机をゆっくり映してください（平面を探しています）"
+            if hasPlaneHit { return "黄色い印を作品の底の中心に合わせて「ここが底の中心」を押してください" }
+            if hasDetectedPlane { return "作品の真下（底の中心）に印を合わせてください" }
+            return "机の上を横にゆっくり動かして映してください（机の模様や物が映ると見つかりやすい）"
         case .adjustingSize: return "円柱が作品をちょうど囲むように、高さと半径を合わせてください"
         case .capturing: return assessment.primaryMessage
         }
+    }
+
+    /// 案内の 2 行目（こつ。無ければ nil）。
+    var guidanceTip: String? {
+        guard phase == .placingBase, showPlaneTip else { return nil }
+        return "白い机は見つけにくいので、新聞紙や柄のある布を作品の下に敷くと見つかりやすくなります"
     }
 }
 
