@@ -71,6 +71,9 @@ final class FakeReceiver: HTTPTransport, @unchecked Sendable {
     var throwNetworkError = false
     var commitStatusOverride: Int?
     var alwaysFailPUT = false
+    /// PUT した写真・マスクの path と、そのうちファイルから送ったもの（メモリの Data ではなく）。
+    var fileBodyPaths: [String] = []
+    var streamedPaths: [String] = []
 
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         try lock.withLock { try handle(request) }
@@ -107,7 +110,9 @@ final class FakeReceiver: HTTPTransport, @unchecked Sendable {
             let uploadId = parts[3]
             let filePath = parts[5...].joined(separator: "/")
             guard let entry = manifests[uploadId]?.first(where: { $0.path == filePath }) else { return json(409, ["error": "not in manifest"]) }
-            let data = request.body ?? Data()
+            let data = request.bodyFileURL.flatMap { try? Data(contentsOf: $0) } ?? request.body ?? Data()
+            if filePath != "session.json" { fileBodyPaths.append(filePath) }
+            if request.bodyFileURL != nil { streamedPaths.append(filePath) }
             guard Int64(data.count) == entry.size, Hashing.sha256Hex(data) == entry.sha256, request.headers["X-Content-SHA256"] == entry.sha256 else {
                 return json(422, ["error": "mismatch"])
             }
@@ -196,6 +201,9 @@ final class TransferClientTests: XCTestCase {
         XCTAssertEqual(receiver.count("PUT"), 5)
         XCTAssertEqual(store.transferDisplayStatus(sessionId), .sent)
         XCTAssertFalse(store.isBusy(sessionId))
+        // 写真・マスクはファイルから送る（メモリの Data にしない）。session.json だけが控えの Data。
+        XCTAssertEqual(receiver.fileBodyPaths.count, 4)
+        XCTAssertEqual(receiver.streamedPaths.sorted(), receiver.fileBodyPaths.sorted())
 
         let again = await uploader().send(sessionId: sessionId)
         guard case let .complete(_, _, already2, _) = again else { return XCTFail("\(again)") }

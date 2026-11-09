@@ -13,6 +13,8 @@ struct ReviewView: View {
     @State private var confirmRegenerate = false
     @State private var confirmDeleteSuperseded = false
     @State private var readiness: Readiness?
+    /// 一覧に出す写真のまとまり（段ごと）。読み直したときにだけ作る。
+    @State private var groups: [PhotoGroup] = []
 
     private let columns = [GridItem(.adaptive(minimum: 104), spacing: 8)]
 
@@ -25,15 +27,26 @@ struct ReviewView: View {
                         Label("送信中のため、撮影・編集はできません", systemImage: "lock.fill")
                             .font(.subheadline).foregroundStyle(.orange)
                     }
-                    LazyVGrid(columns: columns, spacing: 8) {
-                        ForEach(session.photos.sorted { $0.sequence < $1.sequence }) { photo in
-                            Button {
-                                model.open(.photo(sessionId: sessionId, photoId: photo.photoId))
-                            } label: {
-                                PhotoCell(photo: photo, session: session, issues: readiness?.issues(for: photo.photoId) ?? [],
-                                          url: model.store.photoURL(sessionId, photoId: photo.photoId))
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                        ForEach(groups) { group in
+                            Section {
+                                ForEach(group.photos) { photo in
+                                    Button {
+                                        model.open(.photo(sessionId: sessionId, photoId: photo.photoId))
+                                    } label: {
+                                        PhotoCell(photo: photo, session: session, issues: readiness?.issues(for: photo.photoId) ?? [],
+                                                  url: model.store.photoURL(sessionId, photoId: photo.photoId))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            } header: {
+                                if let title = group.title {
+                                    Text(title)
+                                        .font(.subheadline.bold())
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.top, 6)
+                                }
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                 }
@@ -100,6 +113,7 @@ struct ReviewView: View {
     private func reload() {
         session = model.loadSession(sessionId)
         readiness = session.map { Readiness.make(session: $0, pendingPhotoIds: model.masks.pendingPhotoIds()) }
+        groups = session.map { PhotoGroup.make(session: $0, progress: readiness?.progress) } ?? []
     }
 
     private func deleteSuperseded() {
@@ -165,6 +179,42 @@ struct ReadinessView: View {
     }
 }
 
+/// 確認画面の写真のまとまり。撮る方向の段が 2 つ以上あるときは段ごと（段の中は方位の順）、
+/// 方向の無い写真（追加撮影・基準なし）は最後にまとめる。段が 1 つなら撮影順に 1 つ（見出しなし）。
+struct PhotoGroup: Identifiable {
+    let id: String
+    let title: String?
+    let photos: [Photo]
+
+    static func make(session: CaptureSession, progress: CoverageProgress?) -> [PhotoGroup] {
+        let photos = session.photos.sorted { $0.sequence < $1.sequence }
+        let plan = session.directionPlan
+        let bands = plan.bands
+        guard bands.count > 1 else { return [PhotoGroup(id: "all", title: nil, photos: photos)] }
+        var byBand: [String: [(azimuth: Double, photo: Photo)]] = [:]
+        var others: [Photo] = []
+        for photo in photos {
+            if let target = plan.target(id: photo.direction.targetId), let band = bands.first(where: { $0.contains(target) }) {
+                byBand[band.id, default: []].append((target.azimuthDeg, photo))
+            } else {
+                others.append(photo)
+            }
+        }
+        let bandProgress = progress?.bands ?? []
+        var groups = bands.compactMap { band -> PhotoGroup? in
+            guard let items = byBand[band.id], !items.isEmpty else { return nil }
+            // 方位の順。同じ方位（撮り直し）は撮影順。
+            let sorted = items.sorted { ($0.azimuth, $0.photo.sequence) < ($1.azimuth, $1.photo.sequence) }.map(\.photo)
+            let done = bandProgress.first { $0.id == band.id }.map { "・そろった \($0.doneCount)/\($0.totalCount)" } ?? ""
+            return PhotoGroup(id: "band-\(band.id)", title: "高さ \(band.id)°（\(sorted.count) 枚\(done)）", photos: sorted)
+        }
+        if !others.isEmpty {
+            groups.append(PhotoGroup(id: "others", title: "そのほか（追加撮影・方向なし \(others.count) 枚）", photos: others))
+        }
+        return groups
+    }
+}
+
 struct PhotoCell: View {
     let photo: Photo
     let session: CaptureSession
@@ -224,7 +274,7 @@ struct PhotoCell: View {
 
     private var directionLabel: String {
         if let target = session.directionPlan.target(id: photo.direction.targetId) {
-            return "\(Int(target.azimuthDeg))°・高さ \(Int(target.elevationDeg))°"
+            return "\(DirectionTarget.formatDegrees(target.azimuthDeg))°・高さ \(DirectionTarget.formatDegrees(target.elevationDeg))°"
         }
         if let az = photo.direction.azimuthDeg {
             return "\(Int(az.rounded()))°（追加）"

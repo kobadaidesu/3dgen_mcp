@@ -90,6 +90,41 @@ public struct CoverageProgress: Equatable, Sendable {
     }
 }
 
+/// 仰角の段ごとの進み具合（撮影画面の「20°: 18/24 · 45°: 0/16 · 70°: 0/8」）。
+public struct BandProgress: Equatable, Sendable, Identifiable {
+    public var elevationDeg: Double
+    /// そろった方向の数。
+    public var doneCount: Int
+    /// 撮影中に撮ったとみなす方向の数（そろった ＋ 確認中）。
+    public var coveredCount: Int
+    public var totalCount: Int
+
+    public var id: String { DirectionTarget.formatDegrees(elevationDeg) }
+    public var isComplete: Bool { doneCount >= totalCount }
+    /// 「20°: 18/24」
+    public var text: String { "\(DirectionTarget.formatDegrees(elevationDeg))°: \(doneCount)/\(totalCount)" }
+}
+
+extension CoverageProgress {
+    /// 段ごとの進み具合（低い順）。
+    public var bands: [BandProgress] {
+        DirectionPlan(id: "", targets: targets.map(\.target)).bands.map { band in
+            let states = band.targets.map { state(of: $0.id) }
+            return BandProgress(
+                elevationDeg: band.elevationDeg, doneCount: states.filter { $0 == .done }.count,
+                coveredCount: states.filter(\.countsAsCovered).count, totalCount: band.targets.count
+            )
+        }
+    }
+
+    /// 段ごとの進み具合の 1 行（例：「20°: 18/24 · 45°: 0/16 · 70°: 0/8」）。段が 1 つなら nil。
+    public var bandSummary: String? {
+        let bands = self.bands
+        guard bands.count > 1 else { return nil }
+        return bands.map(\.text).joined(separator: " · ")
+    }
+}
+
 extension Coverage {
     /// 基準 `referenceFrameId` の撮影方向ごとの状態。数えるのは、その基準で撮った、方向が確定した写真だけ。
     /// - そろった：代表の写真のマスクが使える（`confirmed`、または `candidate` で確かめた結果が ok）。

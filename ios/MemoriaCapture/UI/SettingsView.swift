@@ -82,14 +82,27 @@ struct SettingsView: View {
             Section {
                 Picker("撮る方向", selection: $settings.planPreset) {
                     ForEach(DirectionPlanPreset.allCases) { preset in
-                        Text("\(preset.displayName)（\(preset.plan.targets.count)）").tag(preset)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(preset.displayName)
+                            Text(preset.summary).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .tag(preset)
                     }
                 }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } header: {
+                Text("撮る方向")
+            } footer: {
+                Text("新しく作るセッションから使われます。今あるセッションは、作ったときの方向のままです。")
+            }
+
+            Section {
                 Toggle("自動撮影", isOn: $settings.autoCaptureEnabled)
             } header: {
                 Text("撮影")
             } footer: {
-                Text("撮る方向は、新しく作るセッションから使われます。自動撮影は、まだ撮っていない方向で、作品が画面に収まり、止まっているときに撮ります（1 枚目の正面は手で撮ります）。")
+                Text("自動撮影は、まだ撮っていない方向で、作品が画面に収まり、止まっているときに撮ります（1 枚目の正面は手で撮ります）。")
             }
 
             Section("この iPhone") {

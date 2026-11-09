@@ -38,6 +38,8 @@ final class CaptureController: ObservableObject {
     @Published private(set) var plan: DirectionPlan
     @Published private(set) var captureInFlight = false
     @Published private(set) var photoCount = 0
+    /// このセッションで、切り抜きの順番待ち・作成中の写真の数（撮影は止めない）。
+    @Published private(set) var maskBacklog = 0
     @Published private(set) var referenceState: ReferenceState = .none
     @Published var banner: Banner?
     @Published var showWarningsSheet = false
@@ -46,6 +48,8 @@ final class CaptureController: ObservableObject {
     @Published var autoCaptureEnabled: Bool
 
     static let heightRangeCm: ClosedRange<Double> = 3...60
+    /// 切り抜きの処理がこれより多く遅れたら、撮影画面に「切り抜きを処理中（残り n 枚）」を出す（撮影は続ける）。
+    static let maskBacklogNoticeCount = 6
     static let radiusRangeCm: ClosedRange<Double> = 2...40
 
     let arView: ARSCNView
@@ -73,6 +77,8 @@ final class CaptureController: ObservableObject {
     private var lastMarkerKey = ""
     /// 前に読んだときの撮り直しの方向（新しく撮り直しになった方向だけ知らせる）。
     private var lastRetakeIds: Set<String> = []
+    /// 前の解析で案内した段（仰角）。段が変わったら知らせる。
+    private var lastGuideBand: Double?
     private let saveQueue = DispatchQueue(label: "memoria.capture.save", qos: .userInitiated)
 
     init(sessionId: String, preferredTargetId: String?, store: SessionStore, settings: AppSettings, masks: MaskProcessor, onSessionChanged: @escaping @MainActor () -> Void) {
@@ -83,9 +89,10 @@ final class CaptureController: ObservableObject {
         self.masks = masks
         self.onSessionChanged = onSessionChanged
         autoCaptureEnabled = settings.autoCaptureEnabled
-        evaluator = QualityEvaluator(thresholds: settings.thresholds)
         let session = try? store.loadSession(sessionId)
         let initialPlan = session?.directionPlan ?? DirectionPlanPreset.default.plan
+        // 方向の多い一覧（photogrammetry）は、自動撮影の待ち時間を短くする（安定は同じだけ求める）。
+        evaluator = QualityEvaluator(thresholds: settings.thresholds.adapted(to: initialPlan))
         plan = initialPlan
         progress = .empty(plan: initialPlan)
         photoCount = session?.photos.count ?? 0
@@ -315,6 +322,7 @@ final class CaptureController: ObservableObject {
         covered = []
         progress = .empty(plan: plan)
         lastRetakeIds = []
+        lastGuideBand = nil
         direction = nil
         if let anchor = baseAnchor { arView.session.remove(anchor: anchor) }
         baseAnchor = nil
@@ -339,6 +347,8 @@ final class CaptureController: ObservableObject {
         guard let session = try? store.loadSession(sessionId) else { return }
         photoCount = session.photos.count
         plan = session.directionPlan
+        let pendingMasks = masks.pendingPhotoIds()
+        maskBacklog = session.photos.filter { pendingMasks.contains($0.photoId) || $0.mask.status == .processing }.count
         if let id = activeReferenceId, let reference = session.referenceFrame(id: id), reference.isValid {
             objectToWorld = reference.objectToWorld?.simd
             referenceState = objectToWorld == nil ? .awaitingFront : .ready
@@ -354,7 +364,12 @@ final class CaptureController: ObservableObject {
             showBanner("\(DirectionContext.label(first)) の写真の切り抜きがうまくいきませんでした。もう一度撮ります", isError: true)
         }
         pushReference()
-        updateMarkers(nextId: direction?.nextTarget?.id, force: true)
+        updateMarkers(next: direction?.nextTarget, force: true)
+    }
+
+    /// 切り抜きの処理が遅れているときの表示（遅れていなければ nil）。
+    var maskBacklogNotice: String? {
+        maskBacklog > Self.maskBacklogNoticeCount ? "切り抜きを処理中（残り \(maskBacklog) 枚）" : nil
     }
 
     /// すべての方向がそろった（確認中を含まない）。
@@ -374,12 +389,31 @@ final class CaptureController: ObservableObject {
         processor.reference = reference
     }
 
-    private func updateMarkers(nextId: String?, force: Bool = false) {
-        let states = Dictionary(uniqueKeysWithValues: progress.targets.map { ($0.target.id, $0.state) })
-        let key = "\(objectToWorld != nil)|\(states.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value.rawValue)" })|\(nextId ?? "")"
+    /// 撮る方向の印。今の段（次に撮る方向の段）の印だけを出し、ほかの段は撮った印だけを薄く出す。
+    private func updateMarkers(next: DirectionTarget?, force: Bool = false) {
+        let nextId = next?.id
+        let band = next?.elevationDeg
+        // 状態は一覧の順に並べて比べる（毎回の解析で呼ぶので、並べ替えはしない）。
+        let stateKey = progress.targets.map { $0.state.rawValue.prefix(2) }.joined()
+        let key = "\(objectToWorld != nil)|\(stateKey)|\(nextId ?? "")|\(band.map { "\($0)" } ?? "")"
         guard force || key != lastMarkerKey else { return }
         lastMarkerKey = key
-        overlay.showMarkers(plan: plan, objectToWorld: objectToWorld, heightM: heightCm / 100, radiusM: radiusCm / 100, states: states, nextId: nextId)
+        let states = Dictionary(uniqueKeysWithValues: progress.targets.map { ($0.target.id, $0.state) })
+        overlay.showMarkers(plan: plan, objectToWorld: objectToWorld, heightM: heightCm / 100, radiusM: radiusCm / 100,
+                            states: states, nextId: nextId, activeBandElevation: band)
+    }
+
+    /// 次に撮る方向の段が変わった（1 周がそろった）ら知らせる。
+    private func announceBandChange(_ direction: DirectionContext?) {
+        guard let direction, direction.hasMultipleBands, direction.azimuthDeg != nil else { return }
+        guard let next = direction.nextTarget else {
+            lastGuideBand = nil
+            return
+        }
+        defer { lastGuideBand = next.elevationDeg }
+        guard let previous = lastGuideBand, abs(previous - next.elevationDeg) >= 0.5 else { return }
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        showBanner(DirectionContext.bandStartMessage(next, fromElevationDeg: previous), isError: false)
     }
 
     // MARK: 撮影前の判定
@@ -398,7 +432,8 @@ final class CaptureController: ObservableObject {
         assessment = evaluator.evaluate(sample)
         direction = sample.direction
         if phase == .capturing {
-            updateMarkers(nextId: sample.direction?.nextTarget?.id)
+            updateMarkers(next: sample.direction?.nextTarget)
+            announceBandChange(sample.direction)
         }
         if let center = analysis.normalizedCenter, phase == .capturing {
             focus.focus(at: center)

@@ -73,6 +73,8 @@ final class ARFrameProcessor: NSObject, ARSessionDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private var _reference: LiveReference
     private var analysisBusy = false
+    /// 撮る順の案内の状態（歩いている向き・今の段）。analysisQueue の中だけで使う（解析は 1 つずつ）。
+    private var route = CaptureRoute()
 
     // delegateQueue の中だけで使う。
     private var motion = MotionEstimator()
@@ -104,6 +106,10 @@ final class ARFrameProcessor: NSObject, ARSessionDelegate, @unchecked Sendable {
                         self?.driftReported = false
                         self?.notAvailableSince = nil
                     }
+                }
+                if newValue.anchorId != _reference.anchorId || newValue.plan != _reference.plan || newValue.objectToWorld == nil {
+                    // 基準（作品座標）が変わったら、歩いている向き・今の段も数え直す。
+                    analysisQueue.async { [weak self] in self?.route.reset() }
                 }
                 _reference = newValue
             }
@@ -184,10 +190,12 @@ final class ARFrameProcessor: NSObject, ARSessionDelegate, @unchecked Sendable {
             let metrics = luma.flatMap { ImageMetrics.computeOnSamples($0) }
             var direction: DirectionContext?
             if hasReference, let base = ref.basePoint {
+                let azimuth = ref.objectToWorld.map { Geometry.azimuth(cameraPosition: transform.translation, objectToWorld: $0) }
+                self.route.update(azimuthDeg: azimuth, plan: ref.plan, covered: ref.covered)
                 direction = DirectionContext.make(
                     cameraPosition: transform.translation, basePoint: base, heightM: ref.heightM,
                     objectToWorld: ref.objectToWorld, plan: ref.plan, covered: ref.covered,
-                    preferredTargetId: ref.preferredTargetId, retake: ref.retake
+                    preferredTargetId: ref.preferredTargetId, retake: ref.retake, route: self.route
                 )
             }
             let sample = LiveFrameSample(

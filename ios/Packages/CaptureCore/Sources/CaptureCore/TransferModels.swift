@@ -208,6 +208,24 @@ public struct TransferSnapshot: Sendable {
         self.fileURLs = fileURLs
     }
 
+    /// 送るファイルの場所（session.json 以外）。ファイルを少しずつ読んで大きさとハッシュを控えと比べ、違えばエラー。
+    /// 送るのはこのファイルから（受信側も X-Content-SHA256 で確かめる）。
+    public func verifiedFileURL(for path: String) throws -> URL {
+        guard path != "session.json", let url = fileURLs[path], let entry = manifest.entry(path: path) else {
+            throw TransferError.fileChanged(path)
+        }
+        let computed: (hash: String, size: Int64)
+        do {
+            computed = try Hashing.sha256Hex(fileAt: url)
+        } catch {
+            throw TransferError.fileChanged(path)
+        }
+        guard computed.size == entry.size, computed.hash == entry.sha256 else {
+            throw TransferError.fileChanged(path)
+        }
+        return url
+    }
+
     /// 送るファイルの中身。session.json は控え、ほかはディスクから読み、ハッシュが控えと違えばエラー。
     public func data(for path: String) throws -> Data {
         if path == "session.json" { return sessionJSON }

@@ -37,21 +37,27 @@ struct CaptureOverlay: View {
             DirectionMiniMap(
                 plan: controller.plan, progress: controller.progress,
                 nextId: controller.direction?.nextTarget?.id,
+                activeBandElevation: controller.direction?.nextTarget?.elevationDeg,
                 currentAzimuth: controller.direction?.azimuthDeg,
                 hasFront: controller.referenceState == .ready
             )
-            .frame(width: 96, height: 96)
-            VStack(alignment: .leading, spacing: 6) {
+            .frame(width: 104, height: 104)
+            VStack(alignment: .leading, spacing: 5) {
                 Text("\(controller.progress.doneCount) / \(controller.plan.targets.count)")
                     .font(.system(size: 28, weight: .bold, design: .rounded))
                     .monospacedDigit()
                 Text(controller.referenceState == .ready ? "そろった方向" : "まず正面から 1 枚")
                     .font(.caption).foregroundStyle(.secondary)
+                BandProgressLine(bands: controller.progress.bands, activeElevation: controller.direction?.nextTarget?.elevationDeg)
                 progressDetail
                 ElevationIndicator(
                     current: controller.direction?.elevationDeg,
                     target: (controller.direction?.frontTarget ?? controller.direction?.nextTarget)?.elevationDeg
                 )
+                if let notice = controller.maskBacklogNotice {
+                    Label(notice, systemImage: "hourglass")
+                        .font(.caption.bold()).foregroundStyle(.yellow)
+                }
             }
             Spacer(minLength: 0)
         }
@@ -281,55 +287,93 @@ struct StatusChips: View {
     }
 }
 
+/// 段ごとの進み具合（例：「20°: 18/24 · 45°: 0/16 · 70°: 0/8」）。今の段を明るく、ほかを薄く。段が 1 つなら出さない。
+struct BandProgressLine: View {
+    let bands: [BandProgress]
+    let activeElevation: Double?
+
+    var body: some View {
+        if bands.count > 1 {
+            bands.enumerated().reduce(Text("")) { text, item in
+                let (i, band) = item
+                let active = activeElevation.map { abs($0 - band.elevationDeg) < 0.5 } ?? false
+                let part = Text(band.text)
+                    .fontWeight(active ? .bold : .regular)
+                    .foregroundColor(band.isComplete ? .green : (active ? .primary : .secondary))
+                return i == 0 ? part : text + Text(" · ").foregroundColor(.secondary) + part
+            }
+            .font(.caption.monospacedDigit())
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+        }
+    }
+}
+
 /// 上から見た撮影方向の地図（正面が下。そろった＝緑、確認中＝黄、撮り直し＝オレンジ、次＝水色、今のカメラ＝青）。
+/// 段（仰角）ごとに同心の輪（低い段が外側）。今の段（次に撮る方向の段）の点を大きく、ほかの段は小さく薄く描く。
+/// 48 方向でも軽いように Canvas で描く（点ごとに View を作らない）。
 struct DirectionMiniMap: View {
     let plan: DirectionPlan
     let progress: CoverageProgress
     let nextId: String?
+    var activeBandElevation: Double?
     let currentAzimuth: Double?
     let hasFront: Bool
 
     var body: some View {
-        GeometryReader { geo in
-            let size = min(geo.size.width, geo.size.height)
-            let radius = size / 2 - 10
-            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-            ZStack {
-                Circle().stroke(Color.white.opacity(0.5), lineWidth: 2)
-                    .frame(width: radius * 2, height: radius * 2)
-                    .position(center)
-                Image(systemName: "cube.fill").font(.system(size: 14)).foregroundStyle(.white.opacity(0.8)).position(center)
-                if hasFront {
-                    ForEach(plan.targets) { target in
-                        // 上から見て、正面（0°）が下側（カメラ側）、右へ回る（+X）と右側。
-                        let ring = target.elevationDeg > 35 ? radius * 0.55 : radius
-                        let p = point(azimuth: target.azimuthDeg, radius: ring, center: center)
-                        let state = progress.state(of: target.id)
-                        let size: CGFloat = target.id == nextId ? 14 : 10
-                        ZStack {
-                            Circle().fill(Self.color(state, isNext: target.id == nextId))
-                            if state == .retake {
-                                Image(systemName: "arrow.counterclockwise").font(.system(size: 8, weight: .bold)).foregroundStyle(.white)
-                            }
-                        }
-                        .frame(width: state == .retake ? 14 : size, height: state == .retake ? 14 : size)
-                        .position(p)
-                    }
-                    if let currentAzimuth {
-                        let p = point(azimuth: currentAzimuth, radius: radius + 6, center: center)
-                        Image(systemName: "camera.fill")
-                            .font(.system(size: 12))
-                            .foregroundStyle(.blue)
-                            .padding(3)
-                            .background(Circle().fill(.white))
-                            .position(p)
-                    }
-                } else {
-                    Text("正面").font(.caption2.bold()).foregroundStyle(.orange)
-                        .position(x: center.x, y: center.y + radius - 2)
+        Canvas { context, size in
+            let side = min(size.width, size.height)
+            let radius = side / 2 - 10
+            let center = CGPoint(x: size.width / 2, y: size.height / 2)
+            let bands = plan.bands
+            let states = Dictionary(uniqueKeysWithValues: progress.targets.map { ($0.target.id, $0.state) })
+            for (i, band) in bands.enumerated() {
+                let r = ringRadius(index: i, count: bands.count, radius: radius)
+                let active = isActive(band.elevationDeg)
+                context.stroke(Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)),
+                               with: .color(.white.opacity(active ? 0.6 : 0.25)), lineWidth: active ? 2 : 1)
+            }
+            var cube = context.resolve(Image(systemName: "cube.fill"))
+            cube.shading = .color(.white.opacity(0.8))
+            context.draw(cube, at: center)
+            guard hasFront else {
+                context.draw(Text("正面").font(.caption2.bold()).foregroundColor(.orange), at: CGPoint(x: center.x, y: center.y + radius - 2))
+                return
+            }
+            for (i, band) in bands.enumerated() {
+                let r = ringRadius(index: i, count: bands.count, radius: radius)
+                let active = isActive(band.elevationDeg)
+                // 点の大きさ：輪の長さを点の数で割った間隔の 7 割（10 まで）。
+                let spacing = 2 * .pi * r / CGFloat(max(1, band.targets.count))
+                let dot = min(10, max(4, spacing * 0.7)) * (active ? 1 : 0.7)
+                for target in band.targets {
+                    let state = states[target.id] ?? .notShot
+                    let isNext = target.id == nextId
+                    let p = point(azimuth: target.azimuthDeg, radius: r, center: center)
+                    let d = isNext ? dot + 4 : (state == .retake ? dot + 2 : dot)
+                    let rect = CGRect(x: p.x - d / 2, y: p.y - d / 2, width: d, height: d)
+                    let opacity: Double = active ? 1 : (state == .notShot ? 0.25 : 0.45)
+                    context.fill(Path(ellipseIn: rect), with: .color(Self.color(state, isNext: isNext).opacity(opacity)))
                 }
             }
+            if let currentAzimuth {
+                let p = point(azimuth: currentAzimuth, radius: radius + 6, center: center)
+                context.fill(Path(ellipseIn: CGRect(x: p.x - 9, y: p.y - 9, width: 18, height: 18)), with: .color(.white))
+                var camera = context.resolve(Image(systemName: "camera.fill"))
+                camera.shading = .color(.blue)
+                context.draw(camera, in: CGRect(x: p.x - 6, y: p.y - 5, width: 12, height: 10))
+            }
         }
+        .accessibilityLabel("撮影方向の地図（\(progress.doneCount) / \(progress.totalCount)）")
+    }
+
+    private func isActive(_ elevation: Double) -> Bool {
+        activeBandElevation.map { abs($0 - elevation) < 0.5 } ?? true
+    }
+
+    /// 段の輪の半径（低い段が外側）。
+    private func ringRadius(index: Int, count: Int, radius: CGFloat) -> CGFloat {
+        count <= 1 ? radius : radius * (1 - 0.32 * CGFloat(index))
     }
 
     static func color(_ state: TargetState, isNext: Bool) -> Color {

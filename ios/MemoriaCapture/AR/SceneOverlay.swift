@@ -89,7 +89,12 @@ final class SceneOverlay {
 
     /// 撮る方向の印。正面が決まるまでは出さない。
     /// 色：そろった＝緑、確認中＝黄、撮り直し＝オレンジ、次に撮る方向＝水色（大きく）、未撮影＝白。
-    func showMarkers(plan: DirectionPlan, objectToWorld: simd_double4x4?, heightM: Double, radiusM: Double, states: [String: TargetState], nextId: String?) {
+    /// 段が 2 つ以上あるときは、今の段（`activeBandElevation`）の印だけをふつうに出し、ほかの段は撮った・撮り直しの印だけを
+    /// 小さく薄く出す（48 方向をすべて出すと見づらく、描く数も増えるため）。方向の多い一覧では印を小さくする。
+    func showMarkers(
+        plan: DirectionPlan, objectToWorld: simd_double4x4?, heightM: Double, radiusM: Double,
+        states: [String: TargetState], nextId: String?, activeBandElevation: Double?
+    ) {
         guard let objectToWorld else {
             markers.isHidden = true
             return
@@ -101,27 +106,39 @@ final class SceneOverlay {
         }
         let center = SIMD3(0, heightM / 2, 0)
         let distance = radiusM + 0.1
+        let baseScale: Float = plan.isDense ? 0.6 : 1
         for target in plan.targets {
+            let state = states[target.id] ?? .notShot
+            let inActiveBand = activeBandElevation.map { abs($0 - target.elevationDeg) < 0.5 } ?? true
             let node = markerNodes[target.id] ?? {
-                let n = SCNNode(geometry: SCNSphere(radius: 0.012))
+                let sphere = SCNSphere(radius: 0.012)
+                sphere.segmentCount = 12
+                let n = SCNNode(geometry: sphere)
                 n.geometry?.firstMaterial = Self.material(Self.pendingColor)
                 markers.addChildNode(n)
                 markerNodes[target.id] = n
                 return n
             }()
+            // ほかの段の未撮影の印は出さない。
+            guard inActiveBand || state != .notShot else {
+                node.isHidden = true
+                continue
+            }
+            node.isHidden = false
             let az = Geometry.radians(target.azimuthDeg), el = Geometry.radians(target.elevationDeg)
             let local = center + distance * SIMD3(sin(az) * cos(el), sin(el), cos(az) * cos(el))
             let world = objectToWorld * SIMD4(local, 1)
             node.simdPosition = SIMD3(Float(world.x), Float(world.y), Float(world.z))
             let color: UIColor
-            switch states[target.id] ?? .notShot {
+            switch state {
             case .done: color = Self.coveredColor
             case .checking: color = Self.checkingColor
             case .retake: color = Self.retakeColor
             case .notShot: color = target.id == nextId ? Self.nextColor : Self.pendingColor
             }
-            node.geometry?.firstMaterial?.diffuse.contents = color
-            node.scale = target.id == nextId ? SCNVector3(1.5, 1.5, 1.5) : SCNVector3(1, 1, 1)
+            node.geometry?.firstMaterial?.diffuse.contents = inActiveBand ? color : color.withAlphaComponent(0.35)
+            let scale = baseScale * (target.id == nextId ? 1.5 : (inActiveBand ? 1 : 0.6))
+            node.simdScale = SIMD3(repeating: scale)
         }
         markers.isHidden = false
     }

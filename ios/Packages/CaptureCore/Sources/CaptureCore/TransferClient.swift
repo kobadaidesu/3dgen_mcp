@@ -10,12 +10,15 @@ public struct HTTPRequest: Sendable {
     public var url: URL
     public var headers: [String: String]
     public var body: Data?
+    /// 本文をこのファイルから送る（写真・マスク。メモリに読み込まない）。`body` より優先。
+    public var bodyFileURL: URL?
 
-    public init(method: String, url: URL, headers: [String: String] = [:], body: Data? = nil) {
+    public init(method: String, url: URL, headers: [String: String] = [:], body: Data? = nil, bodyFileURL: URL? = nil) {
         self.method = method
         self.url = url
         self.headers = headers
         self.body = body
+        self.bodyFileURL = bodyFileURL
     }
 }
 
@@ -53,7 +56,10 @@ public final class URLSessionTransport: HTTPTransport, @unchecked Sendable {
             urlRequest.setValue(value, forHTTPHeaderField: key)
         }
         let (data, response): (Data, URLResponse)
-        if let body = request.body {
+        if let file = request.bodyFileURL {
+            // ファイルから少しずつ送る（48 枚・150 MB ほどのセッションでも、1 枚分もメモリに載せない）。
+            (data, response) = try await session.upload(for: urlRequest, fromFile: file)
+        } else if let body = request.body {
             (data, response) = try await session.upload(for: urlRequest, from: body)
         } else {
             (data, response) = try await session.data(for: urlRequest)
@@ -274,9 +280,18 @@ public struct TransferClient: Sendable {
     }
 
     public func putFile(sessionId: String, uploadId: String, entry: ManifestEntry, data: Data) async throws {
+        try await putFile(sessionId: sessionId, uploadId: uploadId, entry: entry, body: data, fileURL: nil)
+    }
+
+    /// ファイルから送る（中身はメモリに読み込まない）。
+    public func putFile(sessionId: String, uploadId: String, entry: ManifestEntry, fileURL: URL) async throws {
+        try await putFile(sessionId: sessionId, uploadId: uploadId, entry: entry, body: nil, fileURL: fileURL)
+    }
+
+    private func putFile(sessionId: String, uploadId: String, entry: ManifestEntry, body: Data?, fileURL: URL?) async throws {
         let response = try await perform(HTTPRequest(
             method: "PUT", url: url("/sessions/\(sessionId)/uploads/\(uploadId)/files/\(entry.path)"),
-            headers: ["Content-Type": "application/octet-stream", "X-Content-SHA256": entry.sha256], body: data
+            headers: ["Content-Type": "application/octet-stream", "X-Content-SHA256": entry.sha256], body: body, bodyFileURL: fileURL
         ))
         try checkCommon(response)
         guard response.status == 200 || response.status == 201 else { throw httpError(response) }
@@ -353,8 +368,13 @@ public struct TransferClient: Sendable {
                 onProgress(progress)
                 for entry in manifest.entries where missingSet.contains(entry.path) {
                     try Task.checkCancellation()
-                    let data = try snapshot.data(for: entry.path)
-                    try await putFile(sessionId: sessionId, uploadId: uploadId, entry: entry, data: data)
+                    // session.json は控え（メモリ）から、写真・マスクはファイルから少しずつ送る。
+                    if entry.path == "session.json" {
+                        try await putFile(sessionId: sessionId, uploadId: uploadId, entry: entry, data: snapshot.sessionJSON)
+                    } else {
+                        let file = try snapshot.verifiedFileURL(for: entry.path)
+                        try await putFile(sessionId: sessionId, uploadId: uploadId, entry: entry, fileURL: file)
+                    }
                     progress.sentFiles += 1
                     progress.sentBytes += entry.size
                     onProgress(progress)

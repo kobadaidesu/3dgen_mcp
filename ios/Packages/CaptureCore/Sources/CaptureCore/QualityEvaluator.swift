@@ -26,6 +26,10 @@ public struct QualityThresholds: Equatable, Sendable {
     public var stableDuration: Double = 0.5
     /// 撮影のあと、次の自動撮影までの時間（秒）。
     public var autoCaptureCooldown: Double = 1.2
+    /// 方向の多い一覧（`DirectionPlan.isDense`。photogrammetry の 48 方向）での待ち時間（秒）。
+    /// 隣の方向が近い（15°）ので、歩きながら次の方向の許容（±7°）を通り過ぎないように短くする。
+    /// 安定（`stableSampleCount`・`stableDuration`）は同じだけ求め、撮影は 1 枚ずつ（撮影中は撮らない）。
+    public var denseAutoCaptureCooldown: Double = 0.7
     /// 基準があるときにトラッキングできない状態がこれより続くと基準を無効にする（秒）。
     public var trackingLostTimeout: Double = 3.0
     /// 基準点のアンカーがこれより動いたら基準を無効にする（m）。
@@ -34,6 +38,23 @@ public struct QualityThresholds: Equatable, Sendable {
     public init() {}
 
     public static let `default` = QualityThresholds()
+
+    /// この一覧で使う、撮影のあと次の自動撮影までの時間（秒）。
+    public func autoCaptureCooldown(for plan: DirectionPlan) -> Double {
+        plan.isDense ? denseAutoCaptureCooldown : autoCaptureCooldown
+    }
+
+    /// この一覧に合わせたしきい値（待ち時間だけ変わる）。
+    public func adapted(to plan: DirectionPlan) -> QualityThresholds {
+        var t = self
+        t.autoCaptureCooldown = autoCaptureCooldown(for: plan)
+        return t
+    }
+}
+
+extension DirectionPlan {
+    /// 方向の多い一覧（1 周に 13 方向以上の段がある）。自動撮影の待ち時間を短くする。
+    public var isDense: Bool { bands.contains { $0.targets.count > 12 } }
 }
 
 public enum CheckKind: String, CaseIterable, Sendable {
@@ -270,9 +291,15 @@ public struct QualityEvaluator: Sendable {
         guard s.reference != .none, let projection = s.projection else {
             return CheckResult(kind: .inFrame, status: .unknown, message: "基準を設定すると収まりを確認します")
         }
+        // 高い位置から撮るときは、スマホを下に傾けないと作品が画面に入らない。
+        let fromAbove = (s.direction?.elevationDeg ?? 0) >= DirectionContext.raisePhoneElevationDeg
         switch projection.status {
         case .inside:
             return CheckResult(kind: .inFrame, status: .ok, message: "作品が画面に収まっています")
+        case .partiallyOutside where fromAbove:
+            return CheckResult(kind: .inFrame, status: .warning, message: "作品が画面からはみ出しています。スマホを下に傾けて、作品を画面の中央に入れてください")
+        case .behindCamera where fromAbove:
+            return CheckResult(kind: .inFrame, status: .warning, message: "作品が画面に入っていません。スマホを下に傾けて、作品を見下ろしてください")
         case .partiallyOutside:
             return CheckResult(kind: .inFrame, status: .warning, message: "作品が画面からはみ出しています。作品を画面の中央に入れるか、少し離れてください")
         case .tooLarge:

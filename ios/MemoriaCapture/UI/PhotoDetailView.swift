@@ -328,7 +328,7 @@ struct PhotoDetailView: View {
     private func directionText(_ photo: Photo) -> String {
         var parts: [String] = []
         if let target = session?.directionPlan.target(id: photo.direction.targetId) {
-            parts.append("方向 \(Int(target.azimuthDeg))°・高さ \(Int(target.elevationDeg))°")
+            parts.append("方向 \(DirectionTarget.formatDegrees(target.azimuthDeg))°・高さ \(DirectionTarget.formatDegrees(target.elevationDeg))°")
         } else {
             parts.append("撮る方向の一覧の外（追加撮影）")
         }
