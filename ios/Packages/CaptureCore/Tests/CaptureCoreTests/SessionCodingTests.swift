@@ -64,8 +64,9 @@ final class SessionCodingTests: XCTestCase {
         var s = exampleSession()
         let j = try json(s)
         let ref = try XCTUnwrap((j["referenceFrames"] as? [[String: Any]])?.first)
-        XCTAssertEqual(Set(ref.keys), ["id", "createdAt", "basePointWorld", "objectToWorld", "frontPhotoId", "invalidatedAt", "invalidationReason", "object"])
+        XCTAssertEqual(Set(ref.keys), ["id", "createdAt", "basePointWorld", "objectToWorld", "frontPhotoId", "invalidatedAt", "invalidationReason", "object", "base"])
         XCTAssertTrue(ref["object"] is NSNull)  // この項目より前の基準と同じ（セッションの object を使う）
+        XCTAssertTrue(ref["base"] is NSNull)  // 基準点の求め方を記録する前の基準と同じ
         XCTAssertEqual(ref["basePointWorld"] as? [Double], [0.1, -0.7, -0.4])
         let m = try XCTUnwrap(ref["objectToWorld"] as? [[Double]])
         XCTAssertEqual(m[0], [1, 0, 0, 0.1])  // 行優先：平行移動は各行の最後

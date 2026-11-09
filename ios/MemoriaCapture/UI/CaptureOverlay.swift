@@ -125,6 +125,12 @@ struct CaptureOverlay: View {
                 .buttonStyle(.borderedProminent)
         case .placingBase:
             VStack(spacing: 10) {
+                if let method = controller.methodText {
+                    MethodLabel(text: method, source: controller.reticleSource)
+                }
+                if controller.showFallbacks {
+                    fallbackPanel
+                }
                 Button {
                     controller.confirmBasePoint()
                 } label: {
@@ -132,14 +138,25 @@ struct CaptureOverlay: View {
                 }
                 .buttonStyle(.borderedProminent).controlSize(.large)
                 .disabled(!controller.hasPlaneHit)
+                HStack {
+                    fallbackMenu
+                    Spacer(minLength: 0)
+                }
                 shutterRow(compact: true)
             }
+        case .measuringEdge:
+            edgePanel
         case .adjustingSize:
             VStack(spacing: 10) {
                 SizeSlider(title: "高さ", value: $controller.heightCm, range: CaptureController.heightRangeCm)
                 SizeSlider(title: "半径", value: $controller.radiusCm, range: CaptureController.radiusRangeCm)
+                HeightNudgeRow(controller: controller)
+                if let method = controller.methodText {
+                    Text(method).font(.caption).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 HStack {
-                    Button("底の位置をやり直す") { controller.beginPlacingBase() }
+                    Button("位置を合わせ直す") { controller.reaimBase() }
                         .buttonStyle(.bordered)
                     Button {
                         controller.confirmReference()
@@ -154,6 +171,90 @@ struct CaptureOverlay: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
         case .capturing:
             shutterRow(compact: false)
+        }
+    }
+
+    /// 照準が当たらないまま時間がたったとき：机の高さの推定の様子と、iPhone の下端で測る方法。
+    private var fallbackPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("机の高さを推定中…").font(.subheadline.bold())
+                Spacer()
+                Text("\(Int((controller.surfaceProgress * 100).rounded()))%").font(.caption.monospacedDigit())
+            }
+            ProgressView(value: controller.surfaceProgress).tint(.cyan)
+            Button {
+                controller.beginEdgeMeasurement()
+            } label: {
+                Label("iPhone の下端を机に当てて測る", systemImage: "iphone.gen3").frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent).tint(.purple)
+        }
+        .padding(10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// いつでも選べる代わりの方法。
+    private var fallbackMenu: some View {
+        Menu {
+            Button {
+                controller.beginEdgeMeasurement()
+            } label: {
+                Label("iPhone の下端を机に当てて測る", systemImage: "iphone.gen3")
+            }
+            if controller.hasPinnedHeight {
+                Button {
+                    controller.clearPinnedHeight()
+                } label: {
+                    Label("測った高さをやめて自動に戻す", systemImage: "arrow.uturn.backward")
+                }
+            }
+            Button {
+                controller.restartSurfaceEstimate()
+            } label: {
+                Label("机の高さを推定し直す", systemImage: "arrow.clockwise")
+            }
+        } label: {
+            Label("平面が見つからないとき", systemImage: "questionmark.circle")
+                .font(.subheadline)
+        }
+        .buttonStyle(.bordered)
+    }
+
+    /// iPhone の下端を机に当てて測っている間。
+    private var edgePanel: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 12) {
+                Image(systemName: "iphone.gen3")
+                    .font(.system(size: 34))
+                    .foregroundStyle(.purple)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(edgeStatusText).font(.subheadline.bold())
+                    ProgressView(value: controller.edgeLowered ? controller.edgeStillProgress : 0).tint(.purple)
+                }
+            }
+            HStack {
+                Button("やめる") { controller.cancelEdgeMeasurement() }
+                    .buttonStyle(.bordered)
+                Button {
+                    controller.measureEdgeNow()
+                } label: {
+                    Text("測る").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent).tint(.purple)
+                .disabled(!controller.canMeasureEdgeNow)
+            }
+            .controlSize(.large)
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    private var edgeStatusText: String {
+        switch controller.edgeStatus {
+        case .tracking: return "位置を確かめています"
+        case .notUpright: return "iPhone を縦に立ててください"
+        case .holding: return controller.edgeLowered ? "そのまま 1 秒…" : "机に当てたら「測る」"
         }
     }
 
@@ -210,6 +311,70 @@ struct BannerView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(isError ? Color.red.opacity(0.9) : Color.green.opacity(0.85), in: RoundedRectangle(cornerRadius: 12))
             .foregroundStyle(.white)
+    }
+}
+
+/// 今使っている方法（照準の色と同じ印を付ける）。
+struct MethodLabel: View {
+    let text: String
+    let source: BasePointSource?
+
+    var body: some View {
+        Label(text, systemImage: icon)
+            .font(.caption.bold())
+            .foregroundStyle(color)
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(.black.opacity(0.55), in: Capsule())
+    }
+
+    private var icon: String {
+        switch source {
+        case .featurePoints?: return "sparkles"
+        case .deviceEdge?: return "iphone.gen3"
+        default: return "square.grid.3x3"
+        }
+    }
+
+    private var color: Color {
+        switch source {
+        case .featurePoints?: return .cyan
+        case .deviceEdge?: return .purple
+        default: return .yellow
+        }
+    }
+}
+
+/// 底の高さを手で合わせる（▼▲ で 0.5 cm ずつ。押し続けると続けて動く）。
+struct HeightNudgeRow: View {
+    @ObservedObject var controller: CaptureController
+
+    var body: some View {
+        HStack {
+            Text("底の高さ").frame(width: 72, alignment: .leading)
+            Button {
+                controller.nudgeHeight(steps: -1)
+            } label: {
+                Image(systemName: "arrowtriangle.down.fill").frame(width: 36, height: 24)
+            }
+            .buttonRepeatBehavior(.enabled)
+            .buttonStyle(.bordered)
+            .accessibilityLabel("底を下げる")
+            Text(controller.heightOffsetText)
+                .monospacedDigit()
+                .frame(maxWidth: .infinity)
+            Button {
+                controller.nudgeHeight(steps: 1)
+            } label: {
+                Image(systemName: "arrowtriangle.up.fill").frame(width: 36, height: 24)
+            }
+            .buttonRepeatBehavior(.enabled)
+            .buttonStyle(.bordered)
+            .accessibilityLabel("底を上げる")
+            Button("0") { controller.resetHeightOffset() }
+                .buttonStyle(.bordered)
+                .disabled(controller.heightOffsetCm == 0)
+        }
+        .font(.subheadline)
     }
 }
 

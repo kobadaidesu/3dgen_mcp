@@ -154,8 +154,10 @@ public struct ReferenceFrame: Codable, Equatable, Sendable {
     @NullCodable public var invalidationReason: InvalidationReason?
     /// この基準を設定したときの作品の大きさ。この項目より前に作った基準は null（セッションの `object` を使う）。
     @NullCodable public var object: ObjectSize?
+    /// 基準点をどの方法で求めたか（平面・特徴点・iPhone の下端、手で合わせた高さ）。この項目より前に作った基準は null。
+    @NullCodable public var base: BasePointInfo?
 
-    public init(id: String, createdAt: Date, basePointWorld: SIMD3<Double>, object: ObjectSize? = nil) {
+    public init(id: String, createdAt: Date, basePointWorld: SIMD3<Double>, object: ObjectSize? = nil, base: BasePointInfo? = nil) {
         self.id = id
         self.createdAt = createdAt
         self.basePointWorld = Vector3(basePointWorld)
@@ -164,6 +166,7 @@ public struct ReferenceFrame: Codable, Equatable, Sendable {
         invalidatedAt = nil
         invalidationReason = nil
         self.object = object
+        self.base = base
     }
 
     public var isValid: Bool { invalidatedAt == nil }

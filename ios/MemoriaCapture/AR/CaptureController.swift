@@ -12,6 +12,8 @@ final class CaptureController: ObservableObject {
         case unsupported(String)
         /// 作品の底の中心を探している（照準を平面に当てる）。
         case placingBase
+        /// iPhone の下端を机に当てて、机の高さを測っている（平面が見つからないとき）。
+        case measuringEdge
         /// 円柱の高さ・半径を合わせている。
         case adjustingSize
         /// 基準があり、撮影できる。
@@ -25,11 +27,14 @@ final class CaptureController: ObservableObject {
         let isError: Bool
     }
 
-    /// 照準がどの方法で平面に当たったか（見つかった平面を延ばした面・見つかった平面の形・推定した平面）。
-    enum ReticleSource: Equatable {
-        case existingPlaneInfinite
-        case existingPlaneGeometry
-        case estimatedPlane
+    /// 「iPhone の下端を机に当てて測る」の今の様子。
+    enum EdgeStatus: Equatable {
+        /// 位置を確かめている（トラッキングが normal でない）。
+        case tracking
+        /// iPhone が立っていない。
+        case notUpright
+        /// 立てて止めている（`edgeStillProgress` が 1 になったら測る）。
+        case holding
     }
 
     @Published private(set) var phase: Phase = .starting
@@ -37,7 +42,23 @@ final class CaptureController: ObservableObject {
     /// カメラより下に水平の平面が 1 つ以上見つかっている（底の中心を探している間）。
     @Published private(set) var hasDetectedPlane = false
     /// 照準が当たった方法（当たっていなければ nil）。
-    @Published private(set) var reticleSource: ReticleSource?
+    @Published private(set) var reticleSource: BasePointSource?
+    /// 特徴点から推定した机の高さの信頼度と、支える点の数（照準が `featurePoints` のとき）。
+    @Published private(set) var surfaceLevel: SurfaceConfidenceLevel?
+    @Published private(set) var surfaceSupport = 0
+    /// 机の高さの推定の進み具合（0〜1。照準が無いときの「机の高さを推定中…」）。
+    @Published private(set) var surfaceProgress: Double = 0
+    /// 照準が当たらないまま `fallbackDelay` 秒たった（代わりの方法を出す）。
+    @Published private(set) var showFallbacks = false
+    /// iPhone の下端で測った机の高さを使っている。
+    @Published private(set) var hasPinnedHeight = false
+    /// 手で合わせた底の高さ（cm。上が正）。照準を当て直しても残す。
+    @Published private(set) var heightOffsetCm: Double = 0 { didSet { applyHeightOffset() } }
+    /// 「iPhone の下端を机に当てて測る」の様子と、止めている時間の進み具合（0〜1）。
+    @Published private(set) var edgeStatus: EdgeStatus = .tracking
+    @Published private(set) var edgeStillProgress: Double = 0
+    /// 測り始めてから iPhone を十分下げた（机に当てたとみなせる）。下げる前は自動では測らず、「測る」を待つ。
+    @Published private(set) var edgeLowered = false
     /// 平面が見つからないまま時間がたった（白い机のこつを出す）。
     @Published private(set) var showPlaneTip = false
     @Published var heightCm: Double = 15 { didSet { updateObjectPreview() } }
@@ -64,6 +85,9 @@ final class CaptureController: ObservableObject {
     /// 切り抜きの処理がこれより多く遅れたら、撮影画面に「切り抜きを処理中（残り n 枚）」を出す（撮影は続ける）。
     static let maskBacklogNoticeCount = 6
     static let radiusRangeCm: ClosedRange<Double> = 2...40
+    /// 手で合わせる底の高さの範囲と、1 回で動かす量（cm）。
+    static let heightOffsetRangeCm: ClosedRange<Double> = -5...5
+    static let heightOffsetStepCm: Double = 0.5
 
     let arView: ARSCNView
     let sessionId: String
@@ -82,6 +106,25 @@ final class CaptureController: ObservableObject {
     private var objectToWorld: simd_double4x4?
     private var baseAnchor: ARAnchor?
     private var lastHit: SIMD3<Double>?
+    /// 照準の点（手で合わせた高さを足す前）と、そのときの画面の中心の線の向き・求め方。
+    private var lastRawHit: SIMD3<Double>?
+    private var lastAimDirection: SIMD3<Double>?
+    private var lastSupportPoints: Int?
+    /// 「ここが底の中心」を押したときの値（手で合わせた高さは、これに足す）。
+    private var rawBase: SIMD3<Double>?
+    private var aimDirection: SIMD3<Double>?
+    private var baseInfo: BasePointInfo?
+    /// 特徴点から机の高さを推定する（約 10 Hz で点を足す）。
+    private var surfaceEstimator = FeaturePointSurfaceEstimator()
+    private var surfaceSearch = SurfaceSearch.empty
+    /// iPhone の下端で測った机の高さ（世界の y）。
+    private var pinnedHeight: Double?
+    private let deviceProfile = DeviceCameraProfile.forModel(DeviceInfoProvider.modelIdentifier)
+    private var edgeTimer: Timer?
+    private var stillness = StillnessTracker()
+    private var edgeSamples: [Double] = []
+    /// 測り始めたときのカメラの高さ。
+    private var edgeStartCameraY: Double?
     private var reticleTimer: Timer?
     /// 照準の位置（少しならす）。最後に当たった時刻から `reticleHoldSeconds` の間は、外れても残す。
     private var smoothedHit: SIMD3<Float>?
@@ -94,6 +137,8 @@ final class CaptureController: ObservableObject {
     private var planeEverFound = false
     /// この基準の設定で、案内の動画を一度出した（自分で閉じたあとに出し直して、ちらつかないように）。
     private var coachingStarted = false
+    /// この基準の設定で、案内の動画を閉じた（照準が当たった・代わりの方法を出した）。二度と出さない。
+    private var coachingFinished = false
     private let coaching = ARCoachingOverlayView()
     private var lastSampleTimestamp: Double = 0
     private var isRunning = false
@@ -162,6 +207,7 @@ final class CaptureController: ObservableObject {
             guard let self else { return }
             self.invalidateReference(.sessionInterrupted, message: nil)
             self.stopReticle()
+            self.stopEdgeTimer()
             self.phase = .failed("AR を開始できませんでした（\(error.localizedDescription)）")
         }
     }
@@ -186,6 +232,7 @@ final class CaptureController: ObservableObject {
         guard isRunning else { return }
         isRunning = false
         stopReticle()
+        stopEdgeTimer()
         invalidateReference(.sessionInterrupted, message: nil)
         arView.session.pause()
         UIDevice.current.endGeneratingDeviceOrientationNotifications()
@@ -196,6 +243,7 @@ final class CaptureController: ObservableObject {
         guard isRunning else { return }
         wasBackgrounded = true
         stopReticle()
+        stopEdgeTimer()
         arView.session.pause()
     }
 
@@ -227,6 +275,10 @@ final class CaptureController: ObservableObject {
             configuration.videoFormat = format
         }
         baseAnchor = nil
+        // 世界の座標が変わるので、ためた特徴点と測った机の高さは使えない。
+        surfaceEstimator.reset()
+        pinnedHeight = nil
+        hasPinnedHeight = false
         processor.resetMotion()
         focus.reset()
         evaluator.reset()
@@ -246,15 +298,29 @@ final class CaptureController: ObservableObject {
 
     // MARK: 基準
 
-    func beginPlacingBase() {
+    /// 底の中心を探し始める。`reaim` が true（「位置を合わせ直す」・机の高さを測ったあと）なら、
+    /// 手で合わせた高さ・測った机の高さ・ためた特徴点を残す。
+    func beginPlacingBase(reaim: Bool = false) {
         guard isRunning else { return }
+        stopEdgeTimer()
         phase = .placingBase
         basePoint = nil
+        rawBase = nil
+        aimDirection = nil
+        baseInfo = nil
         overlay.hideObject()
         stopReticle()
+        if !reaim {
+            heightOffsetCm = 0
+            pinnedHeight = nil
+            hasPinnedHeight = false
+            surfaceEstimator.reset()
+        }
+        surfaceSearch = .empty
         placingStartedAt = CACurrentMediaTime()
         planeEverFound = false
         coachingStarted = false
+        coachingFinished = reaim
         reticleTick = 0
         reticleTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.updateReticle() }
@@ -269,10 +335,17 @@ final class CaptureController: ObservableObject {
         setCoaching(active: false)
         smoothedHit = nil
         lastHit = nil
+        lastRawHit = nil
+        lastAimDirection = nil
+        lastSupportPoints = nil
         targetPlaneId = nil
         set(\.hasPlaneHit, false)
         set(\.hasDetectedPlane, false)
         set(\.reticleSource, nil)
+        set(\.surfaceLevel, nil)
+        set(\.surfaceSupport, 0)
+        set(\.surfaceProgress, 0)
+        set(\.showFallbacks, false)
         set(\.showPlaneTip, false)
     }
 
@@ -285,60 +358,124 @@ final class CaptureController: ObservableObject {
     private static let infinitePlaneMargin: Float = 0.6
     /// 平面が見つからないまま、この時間（秒）がたったら白い机のこつを出す。
     private static let planeTipDelay: TimeInterval = 15
+    /// 照準が当たらないまま、この時間（秒）がたったら代わりの方法（机の高さの推定の様子・iPhone の下端で測る）を出す。
+    private static let fallbackDelay: TimeInterval = 10
 
     private func updateReticle() {
-        guard phase == .placingBase, arView.bounds.width > 0, let frame = arView.session.currentFrame else { return }
+        guard phase == .placingBase, arView.bounds.width > 0 else { return }
         let now = CACurrentMediaTime()
-        let c = frame.camera.transform.columns.3
-        let camera = SIMD3<Float>(c.x, c.y, c.z)
-        let cameraY = camera.y
-        // カメラより下の水平の平面（机・床）。天井や、カメラより上の面は使わない。
-        let planes = frame.anchors.compactMap { $0 as? ARPlaneAnchor }
-            .filter { $0.alignment == .horizontal && $0.transform.columns.3.y < cameraY }
+        let center = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
+        // 画面の中心の線（カメラの位置と向き）。
+        let ray = arView.raycastQuery(from: center, allowing: .estimatedPlane, alignment: .horizontal).map {
+            Ray(origin: SIMD3<Double>($0.origin), direction: SIMD3<Double>($0.direction))
+        }
+        // フレームから要る値だけを写す（フレームは持ち続けない）。特徴点は 2 回に 1 回（約 10 Hz）。
+        let readPoints = reticleTick % 2 == 0 && pinnedHeight == nil
+        typealias Cloud = (points: [SIMD3<Double>], ids: [UInt64], time: Double)
+        guard let snapshot = { () -> (SIMD3<Float>, [ARPlaneAnchor], Cloud?)? in
+            guard let frame = arView.session.currentFrame else { return nil }
+            let c = frame.camera.transform.columns.3
+            let camera = SIMD3<Float>(c.x, c.y, c.z)
+            // カメラより下の水平の平面（机・床）。天井や、カメラより上の面は使わない。
+            let planes = frame.anchors.compactMap { $0 as? ARPlaneAnchor }
+                .filter { $0.alignment == .horizontal && $0.transform.columns.3.y < camera.y }
+            var cloud: Cloud?
+            if readPoints, let raw = frame.rawFeaturePoints {
+                cloud = (raw.points.map { SIMD3<Double>($0) }, raw.identifiers, frame.timestamp)
+            }
+            return (camera, planes, cloud)
+        }() else { return }
+        let (camera, planes, cloud) = snapshot
         if !planes.isEmpty { planeEverFound = true }
 
-        let center = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
-        if let hit = raycastBase(from: center, camera: camera) {
-            if let s = smoothedHit, simd_distance(s, hit.position) < Self.reticleSmoothingRadius {
-                smoothedHit = s + Self.reticleSmoothing * (hit.position - s)
+        if let ray, readPoints {
+            if let cloud {
+                surfaceEstimator.add(points: cloud.points, identifiers: cloud.ids, ray: ray, timestamp: cloud.time)
+            }
+            surfaceSearch = surfaceEstimator.search(ray: ray)
+        }
+
+        let planeHit = raycastBase(from: center, camera: camera)
+        let choice: BasePlacement.Choice?
+        if let ray {
+            choice = BasePlacement.choose(
+                ray: ray,
+                plane: planeHit.map { BasePlacement.PlaneCandidate(point: SIMD3<Double>($0.position), source: $0.source) },
+                surface: surfaceSearch.estimate, pinnedHeight: pinnedHeight
+            )
+        } else {
+            choice = planeHit.map { BasePlacement.Choice(point: SIMD3<Double>($0.position), source: $0.source, supportPoints: nil, confidence: nil) }
+        }
+
+        if let choice {
+            let position = SIMD3<Float>(choice.point)
+            if let s = smoothedHit, simd_distance(s, position) < Self.reticleSmoothingRadius {
+                smoothedHit = s + Self.reticleSmoothing * (position - s)
             } else {
-                smoothedHit = hit.position
+                smoothedHit = position
             }
             lastHitTime = now
-            targetPlaneId = hit.planeId
-            set(\.reticleSource, hit.source)
+            targetPlaneId = choice.source.isARKitPlane ? planeHit?.planeId : nil
+            lastAimDirection = ray?.direction
+            lastSupportPoints = choice.supportPoints
+            set(\.reticleSource, choice.source)
+            set(\.surfaceLevel, choice.source == .featurePoints ? choice.confidence.map(SurfaceConfidenceLevel.init(confidence:)) : nil)
+            set(\.surfaceSupport, choice.supportPoints ?? 0)
         } else if now - lastHitTime > Self.reticleHoldSeconds {
             smoothedHit = nil
             targetPlaneId = nil
             set(\.reticleSource, nil)
+            set(\.surfaceLevel, nil)
+            set(\.surfaceSupport, 0)
         }
 
         if let p = smoothedHit {
-            lastHit = SIMD3(Double(cleaning: p.x), Double(cleaning: p.y), Double(cleaning: p.z))
+            let raw = SIMD3(Double(cleaning: p.x), Double(cleaning: p.y), Double(cleaning: p.z))
+            lastRawHit = raw
+            // 手で合わせた高さを足す（画面の中心の線に沿って。照準は画面の中心に残る）。
+            let shown = BasePlacement.offset(raw, byHeight: heightOffsetCm / 100, alongAimDirection: lastAimDirection)
+            lastHit = shown
             var transform = matrix_identity_float4x4
-            transform.columns.3 = SIMD4(p, 1)
-            overlay.showReticle(at: transform)
+            transform.columns.3 = SIMD4(SIMD3<Float>(shown), 1)
+            overlay.showReticle(at: transform, style: reticleStyle)
         } else {
             lastHit = nil
+            lastRawHit = nil
             overlay.showReticle(at: nil)
         }
         overlay.showPlanes(planes, highlightedId: targetPlaneId, refreshGeometry: reticleTick % 4 == 0)
         reticleTick += 1
 
+        let sinceHit = now - max(placingStartedAt, lastHitTime)
         set(\.hasPlaneHit, lastHit != nil)
         set(\.hasDetectedPlane, !planes.isEmpty)
+        set(\.surfaceProgress, (surfaceSearch.progress * 20).rounded() / 20)
+        set(\.showFallbacks, lastHit == nil && sinceHit >= Self.fallbackDelay)
         set(\.showPlaneTip, !planeEverFound && now - placingStartedAt >= Self.planeTipDelay)
-        if planeEverFound {
+        // Apple の案内の動画は、はじめに何も当たらないときだけ出す。照準が当たった・代わりの方法を出したら閉じて、二度と出さない。
+        if planeEverFound || lastHit != nil || showFallbacks {
+            coachingFinished = true
             setCoaching(active: false)
-        } else if !coachingStarted {
+        } else if !coachingStarted && !coachingFinished {
             coachingStarted = true
             setCoaching(active: true)
         }
     }
 
+    /// 照準の見た目（求め方ごとの色）。
+    private var reticleStyle: SceneOverlay.ReticleStyle {
+        switch reticleSource {
+        case .featurePoints?:
+            let level = surfaceLevel ?? .low
+            return .estimatedHeight(confidence: level == .high ? 1 : (level == .medium ? 0.6 : 0.2))
+        case .deviceEdge?: return .deviceEdge
+        default: return .plane
+        }
+    }
+
     private struct BaseHit {
         let position: SIMD3<Float>
-        let source: ReticleSource
+        let source: BasePointSource
         let planeId: UUID?
     }
 
@@ -347,8 +484,9 @@ final class CaptureController: ObservableObject {
     /// 2. 見つかった平面の形
     /// 3. 推定した平面
     /// それぞれ、カメラより下で一番近い当たりを使う（床と机が両方あれば、手前の机）。
+    /// 当たらないとき・床にしか当たらないときは、特徴点から推定した机の高さを使う（`BasePlacement.choose`）。
     private func raycastBase(from point: CGPoint, camera: SIMD3<Float>) -> BaseHit? {
-        let chain: [(ARRaycastQuery.Target, ReticleSource)] = [
+        let chain: [(ARRaycastQuery.Target, BasePointSource)] = [
             (.existingPlaneInfinite, .existingPlaneInfinite),
             (.existingPlaneGeometry, .existingPlaneGeometry),
             (.estimatedPlane, .estimatedPlane),
@@ -397,11 +535,142 @@ final class CaptureController: ObservableObject {
 
     /// 「ここが底の中心」
     func confirmBasePoint() {
-        guard phase == .placingBase, let hit = lastHit else { return }
+        guard phase == .placingBase, let raw = lastRawHit, let source = reticleSource else { return }
+        rawBase = raw
+        aimDirection = lastAimDirection
+        baseInfo = BasePointInfo(source: source, manualOffsetM: 0, supportPoints: source == .featurePoints ? lastSupportPoints : nil)
         stopReticle()
-        basePoint = hit
         phase = .adjustingSize
+        applyHeightOffset()
+    }
+
+    // MARK: 底の高さを手で合わせる
+
+    /// 底の高さを `steps` 段（1 段 0.5 cm）上げる・下げる。
+    func nudgeHeight(steps: Int) {
+        let value = heightOffsetCm + Double(steps) * Self.heightOffsetStepCm
+        let clamped = min(Self.heightOffsetRangeCm.upperBound, max(Self.heightOffsetRangeCm.lowerBound, value))
+        heightOffsetCm = (clamped * 10).rounded() / 10
+    }
+
+    func resetHeightOffset() {
+        heightOffsetCm = 0
+    }
+
+    /// 手で合わせた高さを基準点に足す（「ここが底の中心」を押したときの画面の中心の線に沿って。線が水平に近ければ真上・真下）。
+    private func applyHeightOffset() {
+        guard phase == .adjustingSize, let rawBase else { return }
+        basePoint = BasePlacement.offset(rawBase, byHeight: heightOffsetCm / 100, alongAimDirection: aimDirection)
         updateObjectPreview()
+    }
+
+    /// 「位置を合わせ直す」：手で合わせた高さ・測った机の高さを残したまま、照準を当て直す。
+    func reaimBase() {
+        beginPlacingBase(reaim: true)
+    }
+
+    // MARK: iPhone の下端を机に当てて測る
+
+    /// 動かさずにこの時間（秒）持っていたら測る。
+    private static let edgeHoldSeconds: Double = 1.0
+    /// 測り始めてから、カメラがこれだけ下がったら（m）、机に当てたとみなして自動で測る。
+    /// 空中で立てて止めただけで測ってしまわないように（下げていなければ「測る」を押して測る）。
+    private static let edgeMinimumDescentM: Double = 0.05
+
+    func beginEdgeMeasurement() {
+        guard isRunning, phase == .placingBase || phase == .adjustingSize else { return }
+        stopReticle()
+        overlay.hideObject()
+        phase = .measuringEdge
+        stillness.reset()
+        edgeSamples = []
+        edgeStartCameraY = nil
+        edgeLowered = false
+        edgeStatus = .tracking
+        edgeStillProgress = 0
+        edgeTimer?.invalidate()
+        edgeTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 10.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.updateEdgeMeasurement() }
+        }
+    }
+
+    private func stopEdgeTimer() {
+        edgeTimer?.invalidate()
+        edgeTimer = nil
+    }
+
+    private func updateEdgeMeasurement() {
+        guard phase == .measuringEdge, let frame = arView.session.currentFrame else { return }
+        let pose = simd_double4x4(fast: frame.camera.transform)
+        let timestamp = frame.timestamp
+        let trackingNormal: Bool
+        if case .normal = frame.camera.trackingState { trackingNormal = true } else { trackingNormal = false }
+        guard trackingNormal else {
+            stillness.reset()
+            edgeSamples = []
+            set(\.edgeStatus, .tracking)
+            set(\.edgeStillProgress, 0)
+            return
+        }
+        if edgeStartCameraY == nil { edgeStartCameraY = pose.translation.y }
+        if let start = edgeStartCameraY, start - pose.translation.y >= Self.edgeMinimumDescentM {
+            set(\.edgeLowered, true)
+        }
+        guard DeviceEdgeMeasurement.isUpright(cameraToWorld: pose) else {
+            stillness.reset()
+            edgeSamples = []
+            set(\.edgeStatus, .notUpright)
+            set(\.edgeStillProgress, 0)
+            return
+        }
+        let still = stillness.update(transform: pose, timestamp: timestamp)
+        if still == 0 { edgeSamples = [] }
+        edgeSamples.append(DeviceEdgeMeasurement.tableHeight(cameraToWorld: pose, profile: deviceProfile))
+        set(\.edgeStatus, .holding)
+        set(\.edgeStillProgress, (min(1, still / Self.edgeHoldSeconds) * 10).rounded() / 10)
+        if edgeLowered, still >= Self.edgeHoldSeconds, let height = edgeSamples.median {
+            finishEdgeMeasurement(height: height)
+        }
+    }
+
+    /// 「測る」：立てていてトラッキングが normal なら、すぐ測る（止めていた間の中央値）。
+    func measureEdgeNow() {
+        guard phase == .measuringEdge, edgeStatus == .holding, let height = edgeSamples.median else { return }
+        finishEdgeMeasurement(height: height)
+    }
+
+    var canMeasureEdgeNow: Bool { phase == .measuringEdge && edgeStatus == .holding }
+
+    func cancelEdgeMeasurement() {
+        guard phase == .measuringEdge else { return }
+        beginPlacingBase(reaim: true)
+    }
+
+    private func finishEdgeMeasurement(height: Double) {
+        stopEdgeTimer()
+        pinnedHeight = height
+        hasPinnedHeight = true
+        heightOffsetCm = 0
+        UINotificationFeedbackGenerator().notificationOccurred(.success)
+        showBanner(deviceProfile.isKnownModel
+                   ? "机の高さを測りました。少し離れて、印を作品の底の中心に合わせてください"
+                   : "机の高さを測りました（この機種はおおよそ）。少し離れて、印を作品の底の中心に合わせてください",
+                   isError: false)
+        beginPlacingBase(reaim: true)
+    }
+
+    /// 測った机の高さをやめて、自動（平面・特徴点）に戻す。
+    func clearPinnedHeight() {
+        pinnedHeight = nil
+        hasPinnedHeight = false
+        smoothedHit = nil
+    }
+
+    /// 特徴点でためた机の高さを捨てて、推定し直す。
+    func restartSurfaceEstimate() {
+        surfaceEstimator.reset()
+        surfaceSearch = .empty
+        smoothedHit = nil
     }
 
     private func updateObjectPreview() {
@@ -413,6 +682,9 @@ final class CaptureController: ObservableObject {
     func confirmReference() {
         guard phase == .adjustingSize, let base = basePoint else { return }
         let heightM = (heightCm * 10).rounded() / 1000, radiusM = (radiusCm * 10).rounded() / 1000
+        // 基準点の求め方と、手で合わせた高さ（mm に丸める）。basePointWorld は高さを足したあとの点。
+        var info = baseInfo ?? BasePointInfo(source: .estimatedPlane)
+        info.manualOffsetM = (heightOffsetCm * 10).rounded() / 1000
         let session: CaptureSession
         do {
             session = try store.updateSession(sessionId) { s in
@@ -424,7 +696,7 @@ final class CaptureController: ObservableObject {
                 // 大きさは基準ごとに残す（前の基準の写真は、前の大きさで切り抜き・確かめをする）。
                 // セッションの object は「最後に設定した大きさ」として前の版のために残す。
                 let size = ObjectSize(heightM: heightM, radiusM: radiusM)
-                s.referenceFrames.append(ReferenceFrame(id: s.nextReferenceFrameId, createdAt: now, basePointWorld: base, object: size))
+                s.referenceFrames.append(ReferenceFrame(id: s.nextReferenceFrameId, createdAt: now, basePointWorld: base, object: size, base: info))
                 s.object = size
             }
         } catch {
@@ -621,7 +893,7 @@ final class CaptureController: ObservableObject {
     func setReferenceFromDialog() {
         showNoReferenceDialog = false
         switch phase {
-        case .placingBase, .adjustingSize: break  // すでに設定している
+        case .placingBase, .adjustingSize, .measuringEdge: break  // すでに設定している
         default: beginPlacingBase()
         }
     }
@@ -733,24 +1005,83 @@ final class CaptureController: ObservableObject {
         }
     }
 
-    /// 案内の 1 行目。
+    /// 案内の 1 行目（いつも 1 つの指示だけ）。
     var guidanceText: String {
         switch phase {
         case .starting: return "カメラを準備しています"
         case .unsupported(let message), .failed(let message): return message
         case .placingBase:
-            if hasPlaneHit { return "黄色い印を作品の底の中心に合わせて「ここが底の中心」を押してください" }
+            if hasPlaneHit {
+                return "\(reticleColorName)印を作品の底の中心（机に接するところ）に合わせて「ここが底の中心」を押してください"
+            }
+            if hasPinnedHeight { return "測った机の高さで探しています。机の作品のあたりへ iPhone を向けてください" }
+            if showFallbacks { return "机が見つかりません。下の「iPhone の下端を机に当てて測る」でも合わせられます" }
             if hasDetectedPlane { return "作品の真下（底の中心）に印を合わせてください" }
             return "机の上を横にゆっくり動かして映してください（机の模様や物が映ると見つかりやすい）"
-        case .adjustingSize: return "円柱が作品をちょうど囲むように、高さと半径を合わせてください"
+        case .measuringEdge:
+            switch edgeStatus {
+            case .tracking: return "そのまま少し待ってください（位置を確かめています）"
+            case .notUpright: return "iPhone を縦にまっすぐ立て、下の端を作品のすぐ横の机に当ててください（カメラは作品へ）"
+            case .holding:
+                return edgeLowered ? "下の端を机に当てたまま、動かさないでください" : "下の端を机に当てて「測る」を押してください"
+            }
+        case .adjustingSize: return "円柱が作品をちょうど囲むように、高さと半径を合わせてください。輪が机に載って見えないときは「底の高さ」で合わせます"
         case .capturing: return assessment.primaryMessage
+        }
+    }
+
+    private var reticleColorName: String {
+        switch reticleSource {
+        case .featurePoints?: return "水色の"
+        case .deviceEdge?: return "紫色の"
+        default: return "黄色い"
         }
     }
 
     /// 案内の 2 行目（こつ。無ければ nil）。
     var guidanceTip: String? {
-        guard phase == .placingBase, showPlaneTip else { return nil }
-        return "白い机は見つけにくいので、新聞紙や柄のある布を作品の下に敷くと見つかりやすくなります"
+        switch phase {
+        case .placingBase:
+            if reticleSource == .featurePoints {
+                return "机の高さは推定です。輪が机に載って見えないときは、次の画面の「底の高さ」で合わせてください"
+            }
+            guard showPlaneTip, !hasPlaneHit else { return nil }
+            return "白い机は見つけにくいので、新聞紙や柄のある布を作品の下に敷くと見つかりやすくなります"
+        case .measuringEdge:
+            return "作品のすぐ横（10 cm 以内）で測ると正確です。1 秒止めると自動で測ります"
+        default:
+            return nil
+        }
+    }
+
+    /// 今使っている方法（照準が当たっているとき・大きさを合わせているとき）。
+    var methodText: String? {
+        let source: BasePointSource?
+        switch phase {
+        case .placingBase: source = reticleSource
+        case .adjustingSize: source = baseInfo?.source
+        default: source = nil
+        }
+        guard let source else { return nil }
+        switch source {
+        case .existingPlaneInfinite, .existingPlaneGeometry: return "見つかった机の平面を使っています"
+        case .estimatedPlane: return "ARKit が推定した平面を使っています"
+        case .featurePoints:
+            if phase == .placingBase, let level = surfaceLevel {
+                return "推定した机の高さを使っています（信頼度 \(level.label)・点 \(surfaceSupport)）"
+            }
+            if let n = baseInfo?.supportPoints { return "推定した机の高さを使っています（点 \(n)）" }
+            return "推定した机の高さを使っています"
+        case .deviceEdge:
+            return deviceProfile.isKnownModel
+                ? "iPhone の下端で測った机の高さを使っています"
+                : "iPhone の下端で測った机の高さ（この機種はおおよそ）を使っています"
+        }
+    }
+
+    /// 底の高さの表示（例：「+0.5 cm」）。
+    var heightOffsetText: String {
+        heightOffsetCm == 0 ? "±0 cm" : String(format: "%+.1f cm", heightOffsetCm)
     }
 }
 

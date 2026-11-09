@@ -9,6 +9,11 @@ import UIKit
 final class SceneOverlay {
     let root = SCNNode()
     private let reticle = SCNNode()
+    private let reticleRing = SCNNode()
+    private let reticleDot = SCNNode()
+    /// 照準のまわりの薄い円盤（推定した机の高さ・iPhone の下端で測った高さのとき。机に載って見えるかで高さを確かめる）。
+    private let reticleDisc = SCNNode()
+    private var reticleStyle: ReticleStyle?
     private let objectNode = SCNNode()
     private let baseRing = SCNNode()
     private let cylinder = SCNNode()
@@ -26,13 +31,33 @@ final class SceneOverlay {
     static let nextColor = UIColor.systemCyan
     static let pendingColor = UIColor.white
 
+    /// 照準の見た目（求め方ごとに色を変える）。
+    enum ReticleStyle: Equatable {
+        /// ARKit の平面（黄色）。
+        case plane
+        /// 特徴点から推定した机の高さ（水色。信頼度が低いほど薄く）。
+        case estimatedHeight(confidence: Double)
+        /// iPhone の下端で測った机の高さ（紫）。
+        case deviceEdge
+
+        static let estimatedColor = UIColor.systemCyan
+        static let deviceEdgeColor = UIColor.systemPurple
+    }
+
     init() {
-        let reticleRing = SCNNode(geometry: SCNTube(innerRadius: 0.035, outerRadius: 0.042, height: 0.001))
+        reticleRing.geometry = SCNTube(innerRadius: 0.035, outerRadius: 0.042, height: 0.001)
         reticleRing.geometry?.firstMaterial = Self.material(.systemYellow)
-        let dot = SCNNode(geometry: SCNCylinder(radius: 0.004, height: 0.001))
-        dot.geometry?.firstMaterial = Self.material(.systemYellow)
+        reticleDot.geometry = SCNCylinder(radius: 0.004, height: 0.001)
+        reticleDot.geometry?.firstMaterial = Self.material(.systemYellow)
+        let disc = SCNCylinder(radius: 0.09, height: 0.0005)
+        disc.radialSegmentCount = 48
+        reticleDisc.geometry = disc
+        reticleDisc.geometry?.firstMaterial = Self.material(UIColor.systemCyan.withAlphaComponent(0.18), writesDepth: false)
+        reticleDisc.renderingOrder = -5
+        reticleDisc.isHidden = true
+        reticle.addChildNode(reticleDisc)
         reticle.addChildNode(reticleRing)
-        reticle.addChildNode(dot)
+        reticle.addChildNode(reticleDot)
         reticle.isHidden = true
 
         baseRing.geometry = SCNTube(innerRadius: 0.077, outerRadius: 0.083, height: 0.002)
@@ -65,10 +90,24 @@ final class SceneOverlay {
     }
 
     /// 平面に当たった位置に照準を出す（nil なら隠す）。
-    func showReticle(at transform: simd_float4x4?) {
+    func showReticle(at transform: simd_float4x4?, style: ReticleStyle = .plane) {
         guard let transform else {
             reticle.isHidden = true
             return
+        }
+        if style != reticleStyle {
+            reticleStyle = style
+            let color: UIColor
+            switch style {
+            case .plane: color = .systemYellow
+            case .estimatedHeight(let confidence):
+                color = ReticleStyle.estimatedColor.withAlphaComponent(CGFloat(0.55 + 0.45 * min(1, max(0, confidence))))
+            case .deviceEdge: color = ReticleStyle.deviceEdgeColor
+            }
+            reticleRing.geometry?.firstMaterial?.diffuse.contents = color
+            reticleDot.geometry?.firstMaterial?.diffuse.contents = color
+            reticleDisc.geometry?.firstMaterial?.diffuse.contents = color.withAlphaComponent(0.18)
+            reticleDisc.isHidden = style == .plane
         }
         reticle.simdTransform = transform
         reticle.isHidden = false

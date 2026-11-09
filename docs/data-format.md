@@ -56,7 +56,12 @@ iPhone 側と PC 側で同じ形です。1 つの撮影セッションが 1 つ�
       "invalidationReason": null,          // "sessionInterrupted" | "trackingLost" | "userReset" | "anchorDrift"
       "object": {                          // この基準を設定したときの作品の大きさ（上の object と同じ形）
         "heightM": 0.15, "radiusM": 0.08, "source": "userAdjusted"
-      }                                    // この項目より前に作った基準は null（または無い）→ 上の object を使う
+      },                                   // この項目より前に作った基準は null（または無い）→ 上の object を使う
+      "base": {                            // 基準点（basePointWorld）をどう求めたか。この項目より前に作った基準は null（または無い）
+        "source": "featurePoints",         // 下の「基準点の求め方」
+        "manualOffsetM": -0.005,           // 手で合わせた底の高さ（m、上が正）。basePointWorld はこれを足したあとの点
+        "supportPoints": 34                // 机の高さの推定に使った特徴点の数（featurePoints のときだけ。ほかは null）
+      }
     }
   ],
   "directionPlan": {                       // 撮る方向の一覧（下の「撮影方向（directionPlan）」）。セッションを作ったときに決まり、あとで変わらない
@@ -143,6 +148,14 @@ iPhone 側と PC 側で同じ形です。1 つの撮影セッションが 1 つ�
 - `direction.confirmed` が true になるのは、写真の `trackingState` が `normal` で、無効になっていない基準（`objectToWorld` あり）があるときだけです。
 - 別の `referenceFrameId` の写真どうしの姿勢は比べられません（同じ世界座標とは限らない）。
 - 作品の大きさは、写真の `referenceFrameId` の基準の `object` を使います（無ければ上の `object`）。基準を設定し直すと上の `object` は新しい大きさになりますが、前の基準の写真は前の大きさで撮っています。`referenceFrames[].object` は後から足した項目で、無くても読めるので `schemaVersion` は 1 のままです。
+- 基準点の求め方 `referenceFrames[].base.source`（`basePointWorld` は、どの方法でも最後に決めた点）：
+  - `"existingPlaneInfinite"`：ARKit が見つけた水平の平面を延ばした面（平面の縁から 0.6 m 以内）と、画面の中心の線の交点。
+  - `"existingPlaneGeometry"`：ARKit が見つけた平面の形との交点。
+  - `"estimatedPlane"`：ARKit が推定した平面との交点。
+  - `"featurePoints"`：ARKit の平面が無い（または床しか無く、机の方が線の上で手前にある）とき。ARKit の特徴点（`rawFeaturePoints`）のうち、画面の中心の線のまわりの円錐（半角 15°）にある最近 1.5 秒の点の高さの度数分布（5 mm ごと）から机の高さを推定し、線との交点を使う。推定なので数 mm〜1 cm ずれることがある（`supportPoints` が少ないほど不確か）。
+  - `"deviceEdge"`：iPhone を縦に立てて下端を作品の横の机に当て、カメラの姿勢と機種ごとのカメラの位置（Apple の寸法図から読んだおおよその値。知らない機種はさらにおおよそ）から机の高さを測り、線との交点を使う。測ったあとの位置の見失い（ドリフト）があれば、その分ずれる。
+  - `manualOffsetM` が 0 でないとき、基準点は「ここが底の中心」を押したときの画面の中心の線に沿って動かしてある（線が水平に近いときは真上・真下）。
+  - `base` は後から足した項目で、無くても読めるので `schemaVersion` は 1 のままです。
 - `direction.targetId` は `directionPlan.targets[].id` のどれか（形は下の「撮影方向（`directionPlan`）」）。
 - 正面を決める 1 枚目（その基準の最初の確定した写真）の方位は 0° です。仰角が方位 0° の方向（一番近い仰角のもの）の許容に入っていれば、その方向の `targetId`（`a000-e20` など）が付きます。外れていると `targetId` は null で、正面の方向はあとで撮り直すことになるので、撮影画面は 1 枚目の前に高さを案内します（警告だけで、撮るのは止めない）。
 
