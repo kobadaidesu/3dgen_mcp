@@ -10,6 +10,7 @@ struct ReviewView: View {
     @State private var session: CaptureSession?
     @State private var editingTitle = false
     @State private var titleDraft = ""
+    @State private var confirmRegenerate = false
 
     private let columns = [GridItem(.adaptive(minimum: 104), spacing: 8)]
 
@@ -48,6 +49,8 @@ struct ReviewView: View {
                         editingTitle = true
                     }
                     .disabled(model.isLocked(sessionId))
+                    Button("切り抜きを作り直す") { confirmRegenerate = true }
+                        .disabled(model.isLocked(sessionId) || regenerateTargets.isEmpty)
                 } label: {
                     Image(systemName: "ellipsis.circle")
                 }
@@ -70,6 +73,13 @@ struct ReviewView: View {
         }
         .onAppear(perform: reload)
         .onChange(of: model.revision) { _, _ in reload() }
+        .confirmationDialog("切り抜きを作り直しますか？", isPresented: $confirmRegenerate, titleVisibility: .visible) {
+            Button("\(regenerateTargets.count) 枚を作り直す") {
+                model.masks.regenerate(sessionId: sessionId, photoIds: regenerateTargets, includeConfirmed: false)
+            }
+        } message: {
+            Text("確認済みの切り抜きはそのまま残します。選び直した切り抜きも、自動で作った切り抜きに置き換わります。元の写真は変わりません。")
+        }
         .alert("作品名", isPresented: $editingTitle) {
             TextField("作品名", text: $titleDraft)
             Button("保存") { model.renameSession(sessionId, title: titleDraft) }
@@ -79,6 +89,15 @@ struct ReviewView: View {
 
     private func reload() {
         session = model.loadSession(sessionId)
+    }
+
+    /// 切り抜きを作り直す写真（確認済み・作成中を除く）。
+    private var regenerateTargets: [String] {
+        let pending = model.masks.pendingPhotoIds()
+        return (session?.photos ?? [])
+            .filter { $0.mask.status != .confirmed && $0.mask.status != .processing && !pending.contains($0.photoId) }
+            .sorted { $0.sequence < $1.sequence }
+            .map(\.photoId)
     }
 
     private func summary(_ session: CaptureSession) -> some View {

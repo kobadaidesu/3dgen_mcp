@@ -24,9 +24,12 @@ struct PhotoDetailView: View {
     @State private var message: String?
     @State private var confirmDelete = false
     @State private var confirmRetake = false
+    @State private var confirmRegenerate = false
 
     private var photo: Photo? { session?.photo(id: photoId) }
     private var locked: Bool { model.isLocked(sessionId) }
+    /// マスクを作っている・作る順番を待っている。
+    private var maskBusy: Bool { photo?.mask.status == .processing || model.masks.pendingPhotoIds().contains(photoId) }
 
     var body: some View {
         ScrollView {
@@ -64,6 +67,11 @@ struct PhotoDetailView: View {
             Button("撮り直す", role: .destructive) { deletePhoto(retake: true) }
         } message: {
             Text("撮影画面で基準を設定し直してから、同じ方向を撮ります。")
+        }
+        .confirmationDialog("切り抜きを作り直しますか？", isPresented: $confirmRegenerate, titleVisibility: .visible) {
+            Button("作り直す") { regenerate() }
+        } message: {
+            Text("選び直した切り抜き・確認済みの切り抜きも、自動で作った切り抜きに置き換わります。元の写真は変わりません。")
         }
     }
 
@@ -129,6 +137,10 @@ struct PhotoDetailView: View {
             Text(directionText(photo)).font(.subheadline)
             Text("切り抜き：\(MaskBadge.label(photo.mask.status))\(photo.mask.selection == .user ? "（選び直し）" : "")\(photo.mask.error.map { "・\($0)" } ?? "")")
                 .font(.subheadline)
+            if let source = photo.mask.inputRegionSource {
+                Text(source == .projectedCylinder ? "作品のまわりを切り抜いて作りました" : "写真の全体から作りました（作品の位置が分からないため）")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let saved = photo.quality.saved {
                 Text("明るさ \(String(format: "%.2f", saved.meanLuma))（\(statusText(saved.brightness))）・シャープさ \(String(format: "%.4f", saved.sharpness))（\(statusText(saved.blur))）")
                     .font(.caption).foregroundStyle(.secondary)
@@ -145,11 +157,20 @@ struct PhotoDetailView: View {
         VStack(spacing: 10) {
             HStack {
                 Button("対象を選び直す") { startEditing(photo) }
-                    .disabled(locked || working || photo.mask.status == .processing || photo.mask.status == .notGenerated)
+                    .disabled(locked || working || maskBusy || photo.mask.status == .notGenerated)
                 Button("この切り抜きでOK") { setMaskStatus(.confirmed) }
                     .disabled(locked || photo.mask.status != .candidate)
             }
             .buttonStyle(.bordered)
+            Button("切り抜きを作り直す") {
+                if photo.mask.status == .confirmed || photo.mask.selection == .user {
+                    confirmRegenerate = true
+                } else {
+                    regenerate()
+                }
+            }
+            .buttonStyle(.bordered)
+            .disabled(locked || working || maskBusy)
             HStack {
                 Button("マスクなしにする") { rejectMask() }
                     .disabled(locked || !photo.mask.status.hasFile)
@@ -210,7 +231,9 @@ struct PhotoDetailView: View {
                     return
                 }
                 analysis = result
-                selected = photo.mask.selectedInstances
+                // マスクを作ったときと同じ切り抜きなら、記録した物の番号がそのまま使える。違えば選び直し。
+                let sameRegion = photo.mask.inputRegionSource == result.plan.source && photo.mask.inputRegion == result.plan.recordedRegion
+                selected = sameRegion ? photo.mask.selectedInstances : []
                 editing = true
             case .failure(let error):
                 message = "切り抜きを作り直せません（\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)）"
@@ -219,10 +242,11 @@ struct PhotoDetailView: View {
     }
 
     private func tapped(at location: CGPoint, imageRect: CGRect) {
-        guard let analysis, let map = analysis.labelMap, let photo, !working, imageRect.contains(location) else { return }
+        guard let analysis, analysis.labelMap != nil, let photo, !working, imageRect.contains(location) else { return }
+        // タップ → 表示した画像の 0〜1 → センサーの向きの写真の 0〜1 → 切り抜き → 物の番号の画像。
         let display = SIMD2((location.x - imageRect.minX) / imageRect.width, (location.y - imageRect.minY) / imageRect.height)
         let sensor = DisplayRotation.sensorPoint(fromDisplay: SIMD2(Double(display.x), Double(display.y)), rotationDegClockwise: photo.image.displayRotationDegClockwise)
-        let label = map.label(x: Int(sensor.x * Double(map.width)), y: Int(sensor.y * Double(map.height)))
+        let label = analysis.label(atNormalizedImagePoint: sensor)
         guard label > 0 else {
             message = "そこには物が見つかっていません"
             return
@@ -239,6 +263,12 @@ struct PhotoDetailView: View {
                 reload()
             }
         }
+    }
+
+    /// 切り抜きを作り直す（元写真は変えない。順番待ちに入れ、1 枚ずつ処理する）。
+    private func regenerate() {
+        message = nil
+        model.masks.regenerate(sessionId: sessionId, photoIds: [photoId], includeConfirmed: true)
     }
 
     private func setMaskStatus(_ status: MaskStatus) {

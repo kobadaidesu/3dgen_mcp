@@ -342,10 +342,15 @@ public struct MaskInfo: Codable, Equatable, Sendable {
     public var selectedInstances: [Int]
     @NullCodable public var selection: MaskSelectionKind?
     @NullCodable public var error: String?
+    /// Vision に渡した範囲（写真のピクセル）。写真の全体を渡したとき・まだ作っていないときは null。
+    @NullCodable public var inputRegion: PixelBox?
+    /// 範囲の決め方。まだ作っていないとき・この項目より前に作ったマスク（写真の全体を渡していた）は null。
+    @NullCodable public var inputRegionSource: MaskInputRegionSource?
 
     public init(
         status: MaskStatus, file: String? = nil, width: Int? = nil, height: Int? = nil, method: String? = nil,
-        instanceCount: Int? = nil, selectedInstances: [Int] = [], selection: MaskSelectionKind? = nil, error: String? = nil
+        instanceCount: Int? = nil, selectedInstances: [Int] = [], selection: MaskSelectionKind? = nil, error: String? = nil,
+        inputRegion: PixelBox? = nil, inputRegionSource: MaskInputRegionSource? = nil
     ) {
         self.status = status
         self.file = file
@@ -356,13 +361,24 @@ public struct MaskInfo: Codable, Equatable, Sendable {
         self.selectedInstances = selectedInstances
         self.selection = selection
         self.error = error
+        self.inputRegion = inputRegion
+        self.inputRegionSource = inputRegionSource
     }
 
     public static let notGenerated = MaskInfo(status: .notGenerated)
 
     /// 失敗（写真は残す）。
-    public static func failed(_ message: String, instanceCount: Int? = nil) -> MaskInfo {
-        MaskInfo(status: .failed, method: visionMethod, instanceCount: instanceCount, error: message)
+    public static func failed(_ message: String, instanceCount: Int? = nil, plan: MaskCropPlan? = nil) -> MaskInfo {
+        MaskInfo(status: .failed, method: visionMethod, instanceCount: instanceCount, error: message,
+                 inputRegion: plan?.recordedRegion, inputRegionSource: plan?.source)
+    }
+
+    /// 切り抜きの範囲を記録する。
+    public func recording(_ plan: MaskCropPlan) -> MaskInfo {
+        var m = self
+        m.inputRegion = plan.recordedRegion
+        m.inputRegionSource = plan.source
+        return m
     }
 }
 

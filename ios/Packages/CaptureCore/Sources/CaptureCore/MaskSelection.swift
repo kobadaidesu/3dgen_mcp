@@ -71,6 +71,70 @@ public enum MaskInstanceSelector {
         }
     }
 
+    /// 選んだ物が画像（切り抜き）のこの割合より広いと、作品ではなく机やマットだとみなす。
+    public static let tooLargeCoverage = 0.85
+
+    /// `autoSelect(map:roi:)` で選んだ物が画像のほとんど（`tooLargeCoverage` より広い）を占め、
+    /// ほかに広すぎない物があるときは、その中で作品の輪郭（`silhouette`、無ければ `roi`）と一番よく重なる物（IoU）に替える。
+    /// 重なる物が無ければ、もとの選び方のまま。
+    public static func autoSelect(map: InstanceLabelMap, roi: PixelRect?, silhouette: [SIMD2<Double>]?) -> [Int] {
+        let selected = autoSelect(map: map, roi: roi)
+        let all = map.instanceLabels
+        let pixels = map.width * map.height
+        guard all.count > 1, pixels > 0 else { return selected }
+        let total = counts(map)
+        let selectedArea = selected.reduce(0) { $0 + total[$1] }
+        guard Double(selectedArea) > tooLargeCoverage * Double(pixels) else { return selected }
+
+        let polygon = silhouette ?? roi.map { [SIMD2($0.minX, $0.minY), SIMD2($0.maxX, $0.minY), SIMD2($0.maxX, $0.maxY), SIMD2($0.minX, $0.maxY)] }
+        guard let polygon, polygon.count >= 3 else { return selected }
+        let candidates = all.filter { Double(total[$0]) <= tooLargeCoverage * Double(pixels) }
+        guard !candidates.isEmpty else { return selected }
+
+        // 輪郭の中のピクセル数と、物ごとの輪郭の中のピクセル数。
+        var insidePolygon = 0
+        var overlap = [Int](repeating: 0, count: 256)
+        for y in 0..<map.height {
+            let row = y * map.bytesPerRow
+            for span in Polygon.rowSpans(polygon, row: y, width: map.width) {
+                insidePolygon += span.count
+                for x in span { overlap[Int(map.labels[row + x])] += 1 }
+            }
+        }
+        func iou(_ l: Int) -> Double {
+            let union = total[l] + insidePolygon - overlap[l]
+            return union > 0 ? Double(overlap[l]) / Double(union) : 0
+        }
+        guard let best = candidates.max(by: { iou($0) < iou($1) || (iou($0) == iou($1) && $0 > $1) }), overlap[best] > 0 else {
+            return selected
+        }
+        return [best]
+    }
+
+    /// 番号ごとのピクセル数。
+    static func counts(_ map: InstanceLabelMap) -> [Int] {
+        var total = [Int](repeating: 0, count: 256)
+        for y in 0..<map.height {
+            let row = y * map.bytesPerRow
+            for x in 0..<map.width { total[Int(map.labels[row + x])] += 1 }
+        }
+        return total
+    }
+
+    /// 選んだ物が画像に占める割合（0〜1）。
+    public static func coverage(map: InstanceLabelMap, selected: [Int]) -> Double {
+        let pixels = map.width * map.height
+        guard pixels > 0 else { return 0 }
+        let total = counts(map)
+        return Double(selected.reduce(0) { $0 + (($1 > 0 && $1 < 256) ? total[$1] : 0) }) / Double(pixels)
+    }
+
+    /// 作品らしい選び方か（何か選んでいて、画像のほとんどを占める物ではない）。
+    /// そうでなければ、もっと狭い切り抜きで作り直してみる。
+    public static func isPlausible(map: InstanceLabelMap, selected: [Int]) -> Bool {
+        !selected.isEmpty && coverage(map: map, selected: selected) <= tooLargeCoverage
+    }
+
     /// 選んだ物の中に `label` があれば外し、無ければ足す（0 = 背景は何もしない）。
     public static func toggle(_ label: Int, in selected: [Int]) -> [Int] {
         guard label > 0 else { return selected }

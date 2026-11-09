@@ -9,15 +9,17 @@ import io
 import json
 import os
 import shutil
+import socket
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 import zlib
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -435,6 +437,47 @@ class TransferTests(ReceiverTestCase):
         text = out.getvalue()
         self.assertIn(cap.sid, text)
         self.assertIn("photos/%s.jpg" % cap.photos[0][0], text)
+
+
+class DisconnectLogTests(ReceiverTestCase):
+    def _handle_error(self, error):
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            try:
+                raise error
+            except Exception:  # noqa: BLE001
+                self.server.handle_error(None, ("192.0.2.1", 50000))
+        return out.getvalue(), err.getvalue()
+
+    def test_client_disconnects_log_one_line(self):
+        for error in (ConnectionResetError(54, "Connection reset by peer"), BrokenPipeError(32, "Broken pipe")):
+            out, err = self._handle_error(error)
+            self.assertEqual(err, "")
+            self.assertEqual(len(out.strip().splitlines()), 1)
+            self.assertIn(type(error).__name__, out)
+            self.assertNotIn("Traceback", out)
+
+    def test_other_errors_keep_traceback(self):
+        out, err = self._handle_error(ValueError("boom"))
+        self.assertIn("Traceback", err)
+        self.assertIn("ValueError: boom", err)
+
+    def test_dropped_keep_alive_connection_is_one_line(self):
+        # Like the iPhone: one request on a keep-alive connection, then the connection is reset.
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", "/api/v1/ping", headers={"X-Memoria-Token": "123456"})
+        resp = conn.getresponse()
+        resp.read()
+        self.assertEqual(resp.status, 200)
+        conn.sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))  # RST on close
+        conn.close()
+        deadline = time.monotonic() + 3
+        while "接続が切れました" not in self.out.getvalue() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertIn("接続が切れました（ConnectionResetError）", self.out.getvalue())
+        self.assertNotIn("Traceback", self.out.getvalue())
+        status, _ = self.request("GET", "/ping")
+        self.assertEqual(status, 200)
 
 
 class UprightTests(ReceiverTestCase):

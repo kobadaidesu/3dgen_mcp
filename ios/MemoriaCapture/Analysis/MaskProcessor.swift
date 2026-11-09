@@ -27,13 +27,27 @@ final class MaskProcessor: @unchecked Sendable {
         return session.photos.contains { ids.contains($0.photoId) || $0.mask.status == .processing }
     }
 
-    /// 写真の解析とマスク作りを順番待ちに入れる。
-    func enqueue(sessionId: String, photoId: String) {
+    /// マスクの作り方。
+    enum Job: Sendable {
+        /// 撮ったあと・起動したとき：明るさ・ブレを測り、マスクが未生成なら作る。
+        case initial
+        /// 切り抜きを作り直す（元写真は変えない）。`includeConfirmed` が false なら、確認済みのマスクは残す。
+        case regenerate(includeConfirmed: Bool)
+    }
+
+    /// 写真の解析とマスク作りを順番待ちに入れる（1 枚ずつ順番に処理する。同じ写真が待っていれば何もしない）。
+    func enqueue(sessionId: String, photoId: String, job: Job = .initial) {
         let inserted = lock.withLock { pending.insert(photoId).inserted }
         guard inserted else { return }
         queue.async { [weak self] in
-            self?.process(sessionId: sessionId, photoId: photoId)
+            self?.process(sessionId: sessionId, photoId: photoId, job: job)
         }
+    }
+
+    /// 切り抜きを作り直す。`includeConfirmed` が false なら確認済み（confirmed）の写真は除く。
+    func regenerate(sessionId: String, photoIds: [String], includeConfirmed: Bool) {
+        for id in photoIds { enqueue(sessionId: sessionId, photoId: id, job: .regenerate(includeConfirmed: includeConfirmed)) }
+        notify(sessionId)
     }
 
     private func notify(_ sessionId: String) {
@@ -42,7 +56,7 @@ final class MaskProcessor: @unchecked Sendable {
         }
     }
 
-    private func process(sessionId: String, photoId: String) {
+    private func process(sessionId: String, photoId: String, job: Job) {
         defer {
             lock.withLock { _ = pending.remove(photoId) }
             notify(sessionId)
@@ -50,7 +64,7 @@ final class MaskProcessor: @unchecked Sendable {
         // 送信中なら少し待ってからやり直す（送信中のセッションは変えない）。
         if store.isBusy(sessionId) {
             lock.withLock { _ = pending.remove(photoId) }
-            queue.asyncAfter(deadline: .now() + 3) { [weak self] in self?.enqueue(sessionId: sessionId, photoId: photoId) }
+            queue.asyncAfter(deadline: .now() + 3) { [weak self] in self?.enqueue(sessionId: sessionId, photoId: photoId, job: job) }
             return
         }
         guard let session = try? store.loadSession(sessionId), let photo = session.photo(id: photoId) else { return }
@@ -66,22 +80,38 @@ final class MaskProcessor: @unchecked Sendable {
                     if let i = s.photos.firstIndex(where: { $0.photoId == photoId }) { s.photos[i].quality.saved = saved }
                 }
             }
-            // 2. マスク（未生成のときだけ。ユーザーが選んだもの・確定したものは作り直さない）。
-            guard photo.mask.status == .notGenerated || photo.mask.status == .processing else { return }
+            // 2. マスク。最初は未生成のときだけ（ユーザーが選んだもの・確定したものは作り直さない）。
+            //    作り直しは、確認済みを除く指定なら確認済みを残す。
+            switch job {
+            case .initial:
+                guard photo.mask.status == .notGenerated || photo.mask.status == .processing else { return }
+            case .regenerate(let includeConfirmed):
+                guard includeConfirmed || photo.mask.status != .confirmed else { return }
+            }
             setMask(sessionId: sessionId, photoId: photoId, MaskInfo(status: .processing, method: MaskInfo.visionMethod))
             notify(sessionId)
+            var tried: MaskCropPlan?
             do {
-                let analysis = try MaskGenerator.analyze(imageURL: imageURL)
-                guard let map = analysis.labelMap, analysis.instanceCount > 0 else {
-                    setMask(sessionId: sessionId, photoId: photoId, MaskInfo(status: .noObject, method: MaskInfo.visionMethod, instanceCount: 0, selection: .auto))
-                    return
+                // 作品のまわりを切り抜いて Vision に渡す。作品らしい物が見つからなければ、もっと狭い切り抜きで試す。
+                let image = try MaskGenerator.loadImage(url: imageURL)
+                var best: (analysis: InstanceAnalysis, selected: [Int])?
+                for plan in MaskCropPlanner.plans(photo: photo, session: session) {
+                    tried = tried ?? plan
+                    let analysis = try MaskGenerator.analyze(image: image, plan: plan)
+                    let selected = analysis.autoSelect()
+                    if let map = analysis.labelMap, MaskInstanceSelector.isPlausible(map: map, selected: selected) {
+                        best = (analysis, selected)
+                        break
+                    }
+                    // 作品らしくなくても、最初に何か選べた結果を残す（ユーザーが選び直せるように）。
+                    if best == nil || (best!.selected.isEmpty && !selected.isEmpty) { best = (analysis, selected) }
                 }
-                // 作品の範囲を、ラベル画像の大きさに合わせる。
-                let roi = region.map { $0.scaled(x: Double(map.width) / Double(photo.image.width), y: Double(map.height) / Double(photo.image.height)) }
-                let selected = MaskInstanceSelector.autoSelect(map: map, roi: roi)
-                try saveSelection(sessionId: sessionId, photo: photo, analysis: analysis, selected: selected, selection: .auto)
+                guard let best else { throw MaskGeneratorError.visionFailed("noPlan") }
+                try saveSelection(sessionId: sessionId, photo: photo, analysis: best.analysis, selected: best.selected, selection: .auto)
             } catch {
-                setMask(sessionId: sessionId, photoId: photoId, .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription))
+                // 失敗しても写真は残す。前のマスクのファイルは使わないので消す。
+                try? FileManager.default.removeItem(at: store.maskURL(sessionId, photoId: photoId))
+                setMask(sessionId: sessionId, photoId: photoId, .failed((error as? LocalizedError)?.errorDescription ?? error.localizedDescription, plan: tried))
             }
         }
     }
@@ -95,29 +125,38 @@ final class MaskProcessor: @unchecked Sendable {
     /// 選んだ物でマスクを作って保存する（何も選ばなければ noObject）。
     private func saveSelection(sessionId: String, photo: Photo, analysis: InstanceAnalysis, selected: [Int], selection: MaskSelectionKind) throws {
         let count = analysis.instanceCount
+        let plan = analysis.plan
         guard !selected.isEmpty else {
-            setMask(sessionId: sessionId, photoId: photo.photoId, MaskInfo(status: .noObject, method: MaskInfo.visionMethod, instanceCount: count, selection: selection))
+            setMask(sessionId: sessionId, photoId: photo.photoId, MaskInfo(status: .noObject, method: MaskInfo.visionMethod, instanceCount: count, selection: selection).recording(plan))
             try? FileManager.default.removeItem(at: store.maskURL(sessionId, photoId: photo.photoId))
             return
         }
         let result = try MaskGenerator.maskPNG(analysis: analysis, instances: selected)
         guard result.width == photo.image.width, result.height == photo.image.height else {
-            setMask(sessionId: sessionId, photoId: photo.photoId, .failed("maskSizeMismatch \(result.width)x\(result.height)", instanceCount: count))
+            try? FileManager.default.removeItem(at: store.maskURL(sessionId, photoId: photo.photoId))
+            setMask(sessionId: sessionId, photoId: photo.photoId, .failed("maskSizeMismatch \(result.width)x\(result.height)", instanceCount: count, plan: plan))
             return
         }
         try store.saveMask(sessionId: sessionId, photoId: photo.photoId, pngData: result.png, mask: MaskInfo(
             status: .candidate, width: result.width, height: result.height, method: MaskInfo.visionMethod,
             instanceCount: count, selectedInstances: selected, selection: selection
-        ))
+        ).recording(plan))
     }
 
     // MARK: 確認画面から
 
-    /// 対象を選び直すための解析（物の番号の画像）。
+    /// 対象を選び直すための解析（物の番号の画像）。マスクを作ったときの切り抜き（記録があれば）を使うので、
+    /// 記録した物の番号がそのまま使える。記録が無ければ新しく決めた切り抜き。
     func analyzeForEditing(sessionId: String, photoId: String, completion: @escaping @MainActor (Result<InstanceAnalysis, Error>) -> Void) {
+        let store = self.store
         let url = store.photoURL(sessionId, photoId: photoId)
         queue.async {
-            let result = Result { try MaskGenerator.analyze(imageURL: url) }
+            let result = Result { () throws -> InstanceAnalysis in
+                let session = try store.loadSession(sessionId)
+                guard let photo = session.photo(id: photoId) else { throw SessionStoreError.photoNotFound(photoId) }
+                let plan = MaskCropPlanner.recordedPlan(photo: photo, session: session) ?? MaskCropPlanner.plan(photo: photo, session: session)
+                return try autoreleasepool { try MaskGenerator.analyze(imageURL: url, plan: plan) }
+            }
             DispatchQueue.main.async { MainActor.assumeIsolated { completion(result) } }
         }
     }

@@ -112,7 +112,12 @@ iPhone 側と PC 側で同じ形です。1 つの撮影セッションが 1 つ�
         "instanceCount": 2,                // Vision が見つけた物の数（番号は写真ごとの番号で、写真間で同じ物とは限らない）
         "selectedInstances": [1],
         "selection": "auto",               // "auto" | "user"
-        "error": null
+        "error": null,
+        "inputRegion": { "x": 652, "y": 617, "width": 2447, "height": 2407 },
+                                           // Vision に渡した範囲（写真のピクセル、原点は左上、センサーの向き）。全体なら null
+        "inputRegionSource": "projectedCylinder"
+                                           // "projectedCylinder"（作品の円柱を投影した範囲）| "fullImage"（写真の全体）
+                                           // まだ作っていない・この項目が入る前に作ったマスクは null
       }
     }
   ]
@@ -123,3 +128,16 @@ iPhone 側と PC 側で同じ形です。1 つの撮影セッションが 1 つ�
 - 撮影に失敗した写真・保存に失敗した写真は `photos` に入りません。
 - `direction.confirmed` が true になるのは、写真の `trackingState` が `normal` で、無効になっていない基準（`objectToWorld` あり）があるときだけです。
 - 別の `referenceFrameId` の写真どうしの姿勢は比べられません（同じ世界座標とは限らない）。
+
+## マスクの作り方（`mask`）
+
+- Vision（`VNGenerateForegroundInstanceMaskRequest`）には、写真の全体ではなく **作品のまわりを切り抜いた画像** を渡します。写真の全体を渡すと、作品が小さいときに机やマットのような大きな面を選ぶ（または何も見つからない）ためです。
+  - 切り抜く範囲：その写真の `referenceFrameId` の基準の `basePointWorld` と `object`（`radiusM`・`heightM`）の円柱を、その写真の `cameraToWorld`・`intrinsics` で投影した外接長方形を、中心のまわりに 1.2 倍に広げ、幅・高さを 512 ピクセル以上にし、写真からはみ出すときは大きさを保ったまま内側へずらしてから写真の中に切り詰めます。session.json の値だけで決まるので、撮ったあとの写真でも作り直せます。
+  - 自動で選ぶ物は、切り抜きの中で投影した円柱と重なる物です。選んだ物が切り抜きの 85% より広い（机やマットらしい）ときは、ほかの物のうち円柱の輪郭と一番よく重なる物に替えます。
+  - 作品らしい物が見つからない（何も無い・広すぎる物だけ）ときは、1.0 倍の切り抜きでもう一度試します。`inputRegion` は実際にマスクを作った方の範囲です。
+  - 基準が無い・作品の大きさが無い・作品がカメラの後ろ・写真の外のときは、写真の全体を渡します（`inputRegion` は null、`inputRegionSource` は `"fullImage"`）。
+- マスクの PNG は、いつも **元写真と同じ幅・高さ・向き** です（切り抜きで作ったマスクを写真の大きさの画像の `inputRegion` の位置に貼り、切り抜きの外は 0）。
+- `selectedInstances`・`instanceCount` の番号は、`inputRegion` の切り抜きに対して Vision が付けた番号です。
+- `inputRegion`・`inputRegionSource` は後から足した項目です。無くても読めるので（無ければ null と同じ）、`schemaVersion` は 1 のままです。
+- 状態の移り方：`notGenerated` →（作り始める）`processing` → `candidate`（物を選べた）| `noObject`（物が無い・選べない）| `failed`（`error` に理由。写真は残す）。`candidate` はユーザーが確認すると `confirmed`、選び直しても `candidate`（`selection` が `"user"`）。
+- 切り抜きの作り直し（iPhone の確認画面の「切り抜きを作り直す」）：元写真は変えず、1 枚ずつ順番に `processing` から同じように作り直します（一覧からはまとめて、`confirmed` の写真は除く。写真 1 枚の画面からは、その写真を `confirmed` でも作り直す）。

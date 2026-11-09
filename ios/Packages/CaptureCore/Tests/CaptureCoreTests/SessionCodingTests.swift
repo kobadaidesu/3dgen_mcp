@@ -116,7 +116,7 @@ final class SessionCodingTests: XCTestCase {
         let saved = try XCTUnwrap(quality["saved"] as? [String: Any])
         XCTAssertEqual(Set(saved.keys), ["meanLuma", "sharpness", "brightness", "blur"])
         let mask = try XCTUnwrap(photo["mask"] as? [String: Any])
-        XCTAssertEqual(Set(mask.keys), ["status", "file", "width", "height", "method", "instanceCount", "selectedInstances", "selection", "error"])
+        XCTAssertEqual(Set(mask.keys), ["status", "file", "width", "height", "method", "instanceCount", "selectedInstances", "selection", "error", "inputRegion", "inputRegionSource"])
         XCTAssertEqual(mask["method"] as? String, "VNGenerateForegroundInstanceMaskRequest")
         XCTAssertTrue(mask["error"] is NSNull)
     }

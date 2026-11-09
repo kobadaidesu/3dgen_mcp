@@ -689,6 +689,10 @@ class Receiver:
 # HTTP layer
 
 
+# The iPhone drops idle keep-alive connections; these are normal and get one short log line, not a traceback.
+CLIENT_DISCONNECT_ERRORS = (ConnectionResetError, BrokenPipeError, ConnectionAbortedError)
+
+
 class ReceiverServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -696,6 +700,13 @@ class ReceiverServer(http.server.ThreadingHTTPServer):
     def __init__(self, address, receiver: Receiver):
         self.receiver = receiver
         super().__init__(address, RequestHandler)
+
+    def handle_error(self, request, client_address):
+        error = sys.exc_info()[1]
+        if isinstance(error, CLIENT_DISCONNECT_ERRORS):
+            log("[http] %s 接続が切れました（%s）" % (client_address[0], type(error).__name__))
+            return
+        super().handle_error(request, client_address)  # real errors keep the full traceback
 
 
 class RequestHandler(http.server.BaseHTTPRequestHandler):
@@ -727,6 +738,11 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             status, body = 200, self._route(method)
         except HttpError as e:
             status, body = e.status, e.body
+        except CLIENT_DISCONNECT_ERRORS as e:
+            self.close_connection = True
+            log("%s %s %s -> 接続が切れました（%s） (%.2fs)" % (self.client_address[0], method, self.path.split("?", 1)[0],
+                                                       type(e).__name__, time.monotonic() - started))
+            return
         except Exception:  # noqa: BLE001
             log("[エラー] %s" % traceback.format_exc().strip())
             status, body = 500, {"status": "error", "errors": ["受信側の内部エラー"]}
