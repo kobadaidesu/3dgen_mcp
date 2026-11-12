@@ -170,27 +170,33 @@ public enum ImageOps {
         return out
     }
 
-    /// The object over neutral mid grey (#7f7f7f) using `alpha` (same size as `photo`, 255 = object).
-    public static func cutout(photo: CGImage, alpha: GrayImage, background: UInt8 = 0x7f) throws -> CGImage {
+    /// The photo with `alpha` (same size, 255 = object) as its alpha channel: a transparent cutout (RGBA, straight alpha).
+    public static func transparentCutout(photo: CGImage, alpha: GrayImage) throws -> CGImage {
         let w = photo.width, h = photo.height
         precondition(alpha.width == w && alpha.height == h)
+        // Draw the photo opaque, then write the mask into the alpha byte.
         guard let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
                                   space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
               let data = ctx.data else { throw Failure.unwritable("context") }
         ctx.draw(photo, in: CGRect(x: 0, y: 0, width: w, height: h))
-        let px = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
-        let bg = Int(background)
+        var rgba = [UInt8](UnsafeBufferPointer(start: data.bindMemory(to: UInt8.self, capacity: w * h * 4), count: w * h * 4))
         // CGContext memory is top row first, same as GrayImage.
-        for i in 0..<(w * h) {
-            let a = Int(alpha.pixels[i])
-            if a == 255 { continue }
-            for c in 0..<3 {
-                let v = Int(px[i * 4 + c])
-                px[i * 4 + c] = UInt8((v * a + bg * (255 - a) + 127) / 255)
-            }
-        }
-        guard let out = ctx.makeImage() else { throw Failure.unwritable("image") }
+        for i in 0..<(w * h) { rgba[i * 4 + 3] = alpha.pixels[i] }
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData),
+              let out = CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                                space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        else { throw Failure.unwritable("image") }
         return out
+    }
+
+    public static func writePNG(_ image: CGImage, to url: URL) throws {
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, "public.png" as CFString, 1, nil) else {
+            throw Failure.unwritable(url.lastPathComponent)
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else { throw Failure.unwritable(url.lastPathComponent) }
     }
 
     public static func writeJPEG(_ image: CGImage, to url: URL, quality: Double = 0.9) throws {

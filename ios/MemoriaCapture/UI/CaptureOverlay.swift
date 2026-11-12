@@ -39,6 +39,7 @@ struct CaptureOverlay: View {
                 nextId: controller.direction?.nextTarget?.id,
                 activeBandElevation: controller.direction?.nextTarget?.elevationDeg,
                 currentAzimuth: controller.direction?.azimuthDeg,
+                currentElevation: controller.direction?.elevationDeg,
                 hasFront: controller.referenceState == .ready
             )
             .frame(width: 104, height: 104)
@@ -48,7 +49,11 @@ struct CaptureOverlay: View {
                     .monospacedDigit()
                 Text(controller.referenceState == .ready ? "そろった方向" : "まず正面から 1 枚")
                     .font(.caption).foregroundStyle(.secondary)
-                BandProgressLine(bands: controller.progress.bands, activeElevation: controller.direction?.nextTarget?.elevationDeg)
+                if controller.plan.usesStepNames {
+                    StepProgressLine(plan: controller.plan, progress: controller.progress, nextId: controller.direction?.nextTarget?.id)
+                } else {
+                    BandProgressLine(bands: controller.progress.bands, activeElevation: controller.direction?.nextTarget?.elevationDeg)
+                }
                 progressDetail
                 ElevationIndicator(
                     current: controller.direction?.elevationDeg,
@@ -481,6 +486,29 @@ struct BandProgressLine: View {
     }
 }
 
+/// 名前で撮る一覧（ai5）の進み具合：「正面 · 右 · 後ろ · 左 · 真上」。そろった＝緑、確認中＝黄、撮り直し＝オレンジ、次＝水色（太字）。
+struct StepProgressLine: View {
+    let plan: DirectionPlan
+    let progress: CoverageProgress
+    let nextId: String?
+
+    var body: some View {
+        plan.targets.enumerated().reduce(Text("")) { text, item in
+            let (i, target) = item
+            let state = progress.state(of: target.id)
+            let isNext = target.id == nextId
+            let part = Text(plan.displayName(of: target))
+                .fontWeight(isNext ? .bold : .regular)
+                .foregroundColor(state == .notShot ? (isNext ? .cyan : .secondary) : DirectionMiniMap.color(state, isNext: isNext))
+            return i == 0 ? part : text + Text(" · ").foregroundColor(.secondary) + part
+        }
+        .font(.caption)
+        .lineLimit(1)
+        .minimumScaleFactor(0.7)
+        .accessibilityLabel("撮る順：" + plan.targets.map { plan.displayName(of: $0) }.joined(separator: "、"))
+    }
+}
+
 /// 上から見た撮影方向の地図（正面が下。そろった＝緑、確認中＝黄、撮り直し＝オレンジ、次＝水色、今のカメラ＝青）。
 /// 段（仰角）ごとに同心の輪（低い段が外側）。今の段（次に撮る方向の段）の点を大きく、ほかの段は小さく薄く描く。
 /// 48 方向でも軽いように Canvas で描く（点ごとに View を作らない）。
@@ -490,6 +518,7 @@ struct DirectionMiniMap: View {
     let nextId: String?
     var activeBandElevation: Double?
     let currentAzimuth: Double?
+    var currentElevation: Double?
     let hasFront: Bool
 
     var body: some View {
@@ -499,7 +528,7 @@ struct DirectionMiniMap: View {
             let center = CGPoint(x: size.width / 2, y: size.height / 2)
             let bands = plan.bands
             let states = Dictionary(uniqueKeysWithValues: progress.targets.map { ($0.target.id, $0.state) })
-            for (i, band) in bands.enumerated() {
+            for (i, band) in bands.enumerated() where !band.targets.allSatisfy(\.anyAzimuth) {
                 let r = ringRadius(index: i, count: bands.count, radius: radius)
                 let active = isActive(band.elevationDeg)
                 context.stroke(Path(ellipseIn: CGRect(x: center.x - r, y: center.y - r, width: r * 2, height: r * 2)),
@@ -521,6 +550,14 @@ struct DirectionMiniMap: View {
                 for target in band.targets {
                     let state = states[target.id] ?? .notShot
                     let isNext = target.id == nextId
+                    // 方位を問わない方向（真上）は地図の真ん中（作品の上）に、輪で描く。
+                    if target.anyAzimuth {
+                        let d: CGFloat = isNext ? 30 : 26
+                        let rect = CGRect(x: center.x - d / 2, y: center.y - d / 2, width: d, height: d)
+                        let color = state == .notShot && !isNext ? Color.white : Self.color(state, isNext: isNext)
+                        context.stroke(Path(ellipseIn: rect), with: .color(color.opacity(active ? 1 : 0.5)), lineWidth: isNext ? 3 : 2)
+                        continue
+                    }
                     let p = point(azimuth: target.azimuthDeg, radius: r, center: center)
                     let d = isNext ? dot + 4 : (state == .retake ? dot + 2 : dot)
                     let rect = CGRect(x: p.x - d / 2, y: p.y - d / 2, width: d, height: d)
@@ -528,8 +565,10 @@ struct DirectionMiniMap: View {
                     context.fill(Path(ellipseIn: rect), with: .color(Self.color(state, isNext: isNext).opacity(opacity)))
                 }
             }
-            if let currentAzimuth {
-                let p = point(azimuth: currentAzimuth, radius: radius + 6, center: center)
+            if let currentAzimuth, currentAzimuth.isFinite {
+                // ほぼ真上では方位が定まらないので、カメラは地図の真ん中に描く。
+                let overhead = (currentElevation ?? 0) >= Geometry.unstableAzimuthElevationDeg
+                let p = overhead ? CGPoint(x: center.x + 14, y: center.y - 14) : point(azimuth: currentAzimuth, radius: radius + 6, center: center)
                 context.fill(Path(ellipseIn: CGRect(x: p.x - 9, y: p.y - 9, width: 18, height: 18)), with: .color(.white))
                 var camera = context.resolve(Image(systemName: "camera.fill"))
                 camera.shading = .color(.blue)

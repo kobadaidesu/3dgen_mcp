@@ -13,16 +13,52 @@ public enum MaskOutcome: Equatable, Sendable {
     case bad
 }
 
+/// 切り抜きの結果で、その方向を撮り直すかの決まり（一覧ごと。`DirectionPlan.retakePolicy`）。
+public enum MaskRetakePolicy: String, Equatable, Sendable {
+    /// 方向の多い一覧（写真測量用）：確かめた結果が ok でなければ撮り直す（suspicious・unknown も）。
+    case strict
+    /// 数枚の写真を AI に見せる一覧（ai5）：はっきり失敗したときだけ撮り直す。
+    /// 失敗＝マスクが作れない（`failed`）・物が無い（`noObject`）・確かめた結果が suspicious で、作品が写っていない
+    /// （`empty`・`tooSmall`）か、マスクの大半が作品の外（`insideSilhouetteRatio` が `lenientMinInsideSilhouetteRatio` 未満）。
+    /// 端に届いている（`touchesCropEdge`）・中心からずれている（`offCenter`）・広すぎる（`tooLarge`）だけ、確かめられない（`unknown`）は撮り直さない。
+    case lenient
+
+    /// lenient で「大半が作品の外」とみなす、輪郭の中にある割合の下限。
+    public static let lenientMinInsideSilhouetteRatio = 0.5
+    /// lenient で撮り直す、作品が写っていないことを示す理由。
+    public static let lenientFailureReasons: Set<MaskCheckReason> = [.empty, .tooSmall]
+
+    /// 確かめた結果（`candidate` の `check`）が撮り直しに当たるか。
+    func needsRetake(_ check: MaskCheck) -> Bool {
+        switch check.status {
+        case .ok: return false
+        case .unknown: return self == .strict
+        case .suspicious:
+            guard self == .lenient else { return true }
+            if !Self.lenientFailureReasons.isDisjoint(with: check.reasons) { return true }
+            if let inside = check.insideSilhouetteRatio, inside < Self.lenientMinInsideSilhouetteRatio { return true }
+            return false
+        }
+    }
+}
+
+extension DirectionPlan {
+    /// この一覧の撮り直しの決まり（ai5 は lenient、ほかは strict）。変えるときはここだけ。
+    public var retakePolicy: MaskRetakePolicy {
+        id == DirectionPlanPreset.ai5.rawValue ? .lenient : .strict
+    }
+}
+
 extension Photo {
-    public var maskOutcome: MaskOutcome {
+    /// 切り抜きの結果（strict：方向の多い一覧の決まり）。
+    public var maskOutcome: MaskOutcome { maskOutcome(policy: .strict) }
+
+    public func maskOutcome(policy: MaskRetakePolicy) -> MaskOutcome {
         switch mask.status {
         case .confirmed: return .good
         case .candidate:
-            switch mask.check?.status {
-            case .ok?: return .good
-            case nil: return .pending
-            case .suspicious?, .unknown?: return .bad
-            }
+            guard let check = mask.check else { return .pending }
+            return policy.needsRetake(check) ? .bad : .good
         case .notGenerated, .processing: return .pending
         case .failed, .noObject: return .bad
         }
@@ -130,10 +166,12 @@ extension Coverage {
     /// - そろった：代表の写真のマスクが使える（`confirmed`、または `candidate` で確かめた結果が ok）。
     /// - 確認中：代表の写真のマスクをまだ作っている・確かめていない。
     /// - 撮り直し：代表の写真のマスクが使えない（suspicious・unknown・failed・noObject）。
+    ///   一覧の `retakePolicy` が lenient（ai5）なら、はっきり失敗したときだけ（`MaskRetakePolicy.lenient`）。
     /// 代表の写真は、使える写真のうち一番新しいもの。使える写真が無ければ一番新しい写真。
     /// 代表より新しくて確認中の写真は、置き換え済みにしない（結果しだいで代表になる）。
     public static func progress(photos: [Photo], referenceFrameId: String?, plan: DirectionPlan) -> CoverageProgress {
         guard let referenceFrameId else { return .empty(plan: plan) }
+        let policy = plan.retakePolicy
         let inFrame = photos
             .filter { $0.referenceFrameId == referenceFrameId && $0.direction.confirmed && $0.direction.targetId != nil }
             .sorted { $0.sequence < $1.sequence }
@@ -142,15 +180,15 @@ extension Coverage {
             guard let latest = shots.last else {
                 return TargetProgress(target: target, state: .notShot, photoId: nil, supersededPhotoIds: [])
             }
-            let winner = shots.last { $0.maskOutcome == .good } ?? latest
+            let winner = shots.last { $0.maskOutcome(policy: policy) == .good } ?? latest
             let state: TargetState
-            switch winner.maskOutcome {
+            switch winner.maskOutcome(policy: policy) {
             case .good: state = .done
             case .pending: state = .checking
             case .bad: state = .retake
             }
             let superseded = shots.filter { shot in
-                shot.photoId != winner.photoId && !(shot.sequence > winner.sequence && shot.maskOutcome == .pending)
+                shot.photoId != winner.photoId && !(shot.sequence > winner.sequence && shot.maskOutcome(policy: policy) == .pending)
             }
             return TargetProgress(target: target, state: state, photoId: winner.photoId, supersededPhotoIds: superseded.map(\.photoId))
         }

@@ -57,9 +57,33 @@ public struct ViewSlot: Equatable, Sendable {
     public var elevationToleranceDeg: Double
     /// Lowest elevation accepted (only `top`).
     public var minimumElevationDeg: Double?
+    /// The plan target this slot stands for (`ai5`): photos matched to it are preferred over every other photo.
+    public var targetId: String?
 
     /// Human-readable name used in labels.
     public var label: String { name.replacingOccurrences(of: "_", with: "-") }
+
+    /// The slots for a session: the 5 named views for an `ai5` session, the standard 10 otherwise.
+    public static func slots(for session: CaptureSession) -> [ViewSlot] {
+        session.directionPlan.usesStepNames ? ai5(plan: session.directionPlan) : standard(lowestBandDeg: ViewSelector.lowestBand(session))
+    }
+
+    /// `ai5`: front / right / back / left at the side elevation, and `top` (straight above, any azimuth).
+    /// Each slot is tied to its plan target (`a000-e15` … `top-e90`), so the photo shot for it is the one used.
+    public static func ai5(plan: DirectionPlan) -> [ViewSlot] {
+        let sides: [(String, Double)] = [("front", 0), ("right", 90), ("back", 180), ("left", 270)]
+        var slots = sides.map { name, az -> ViewSlot in
+            let target = plan.targets.first { !$0.anyAzimuth && Geometry.angleDistance($0.azimuthDeg, az) < 0.5 }
+            return ViewSlot(name: name, kind: .ring, azimuthDeg: az, elevationDeg: target?.elevationDeg ?? 15,
+                            azimuthToleranceDeg: ViewSelector.ringAzimuthTolerance, elevationToleranceDeg: ViewSelector.ringElevationTolerance,
+                            targetId: target?.id)
+        }
+        let top = plan.targets.first(where: \.anyAzimuth)
+        slots.append(ViewSlot(name: "top", kind: .top, azimuthDeg: nil, elevationDeg: top?.elevationDeg ?? 90,
+                              azimuthToleranceDeg: 180, elevationToleranceDeg: 90,
+                              minimumElevationDeg: ViewSelector.ai5TopMinimumElevation, targetId: top?.id))
+        return slots
+    }
 
     /// The 8 ring views at the lowest band, then `top` and `front_high`.
     public static func standard(lowestBandDeg: Double) -> [ViewSlot] {
@@ -115,6 +139,8 @@ public enum ViewSelector {
     public static let ringElevationTolerance = 15.0
     public static let topPreferredElevation = 70.0
     public static let topMinimumElevation = 40.0
+    /// Lowest elevation for the `ai5` top slot (the app takes it at 75° or more; a little slack for extra shots).
+    public static let ai5TopMinimumElevation = 60.0
     /// A chosen photo further than this from the slot gets a note ("weak" slot in the brief).
     public static let weakAngleDeg = 10.0
 
@@ -148,7 +174,7 @@ public enum ViewSelector {
         maskFileExists: (Photo) -> Bool = { _ in true }
     ) -> (referenceFrameId: String?, choices: [ViewChoice]) {
         let frame = majorityReferenceFrame(session)
-        let slots = slots ?? ViewSlot.standard(lowestBandDeg: lowestBand(session))
+        let slots = slots ?? ViewSlot.slots(for: session)
         let superseded = supersededPhotoIds(session)
         let pool = session.photos.filter {
             $0.direction.confirmed && $0.referenceFrameId == frame && frame != nil && !superseded.contains($0.photoId)
@@ -162,7 +188,9 @@ public enum ViewSelector {
             for photo in pool where !used.contains(photo.photoId) {
                 guard let score = angleScore(slot: slot, azimuth: photo.direction.azimuthDeg!, elevation: photo.direction.elevationDeg!) else { continue }
                 let use = MaskUse.of(photo, fileExists: maskFileExists(photo))
-                let key = [Double(use.rank), Double(SavedQualityRank.of(photo)), score, -Double(photo.sequence)]
+                // A photo shot for the slot's own target comes first (ai5: the top-e90 photo is the top view).
+                let offTarget: Double = slot.targetId.map { $0 == photo.direction.targetId ? 0 : 1 } ?? 0
+                let key = [offTarget, Double(use.rank), Double(SavedQualityRank.of(photo)), score, -Double(photo.sequence)]
                 if best == nil || key.lexicographicallyPrecedes(best!.key) { best = (key, photo, use) }
             }
             var choice = ViewChoice(name: slot.name, label: slot.label, requestedAzimuthDeg: slot.azimuthDeg,
@@ -198,7 +226,7 @@ public enum ViewSelector {
             if slot.kind != .top {
                 let d = abs(p.direction.elevationDeg! - slot.elevationDeg)
                 if d > weakAngleDeg { choice.notes.append(String(format: "elevation %.0f° off the slot", d)) }
-            } else if p.direction.elevationDeg! < 55 {
+            } else if p.direction.elevationDeg! < (slot.targetId == nil ? 55 : 75) {
                 choice.notes.append(String(format: "highest photo is only %.0f° elevation (oblique, not a true top view)", p.direction.elevationDeg!))
             }
             choices.append(choice)

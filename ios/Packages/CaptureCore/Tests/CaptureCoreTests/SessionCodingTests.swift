@@ -56,7 +56,8 @@ final class SessionCodingTests: XCTestCase {
         let plan = try XCTUnwrap(j["directionPlan"] as? [String: Any])
         XCTAssertEqual(plan["id"] as? String, "ring8")
         let target = try XCTUnwrap((plan["targets"] as? [[String: Any]])?.first)
-        XCTAssertEqual(Set(target.keys), ["id", "azimuthDeg", "elevationDeg", "azimuthToleranceDeg", "elevationToleranceDeg"])
+        XCTAssertEqual(Set(target.keys), ["id", "azimuthDeg", "elevationDeg", "azimuthToleranceDeg", "elevationToleranceDeg", "anyAzimuth"])
+        XCTAssertEqual(target["anyAzimuth"] as? Bool, false)
         XCTAssertEqual(target["id"] as? String, "a000-e20")
     }
 
@@ -159,10 +160,12 @@ final class SessionCodingTests: XCTestCase {
          "createdAt":"2026-11-09T01:00:00.123Z","updatedAt":"2026-11-09T10:00:00+09:00","conventions":{},
          "device":{"model":"iPhone15,4","systemName":"iOS","systemVersion":"26.6","appVersion":"0.1.0","appBuild":"1"},
          "referenceFrames":[{"id":"ref-1","createdAt":"2026-11-09T10:00:00+09:00","basePointWorld":[0,0,0]}],
-         "directionPlan":{"id":"ring8","targets":[]},"photos":[]}
+         "directionPlan":{"id":"ring8","targets":[{"id":"a000-e20","azimuthDeg":0,"elevationDeg":20,"azimuthToleranceDeg":20,"elevationToleranceDeg":15}]},"photos":[]}
         """
         let s = try SessionJSON.makeDecoder().decode(CaptureSession.self, from: Data(text.utf8))
         XCTAssertNil(s.object)
+        // anyAzimuth の無い前の版の方向は、方位で当てはめる方向。
+        XCTAssertEqual(s.directionPlan.targets.map(\.anyAzimuth), [false])
         XCTAssertNil(s.referenceFrames[0].objectToWorld)
         XCTAssertTrue(s.referenceFrames[0].isValid)
     }

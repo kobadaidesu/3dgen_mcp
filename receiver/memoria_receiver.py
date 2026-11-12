@@ -1228,15 +1228,14 @@ iPhone のアプリから同じネットワーク（自宅の LAN・USB ケー�
 ```
 brief.md            最初に読む説明（作品名・実寸と誤差・座標の決まり・写真の一覧・撮れていない範囲・使い方）
 overview.jpg        選んだ写真の一覧（カメラの位置に並べ、上から見た配置で正面が下）と実寸
-views/<向き>.jpg     代表の写真をまっすぐに回し、作品のまわりで切り抜いたもの（長い辺 1568 px 以下）
-views/<向き>_cutout.jpg  同じ範囲で作品だけを残し、背景を灰色にしたもの
-measurements.json   visual hull で測った実寸（幅 X・奥行き Z・高さ Y、誤差、推定した机の面）
-hull.obj            粗い形（メートル、+Y が上、+Z が正面、y = 0 が机の面）
+views/<向き>.jpg     代表の写真をまっすぐに回し、作品のまわりで切り抜いたもの（背景は写ったまま。長い辺 1568 px 以下）
+measurements.json   実寸（輪郭が 8 枚以上なら visual hull で測った幅 X・奥行き Z・高さ Y と誤差。少ないときは撮影時に合わせた円柱の大きさ＝目安）
+hull.obj            粗い形（visual hull を作れたときだけ。メートル、+Y が上、+Z が正面、y = 0 が机の面）
 pack.json           写真の選び方・出どころ（sessionId・manifestHash）
 ```
 
-向き：front・front_right・right・back_right・back・back_left・left・front_left（低い段）、top（一番高い写真）、front_high。
-手で作り直すときは `tools/claude-pack/.build/release/memoria-pack <sessionId の先頭> --force`。
+向き：AI 用 5 方向（ai5）のセッションは front・right・back・left・top（真上）。ほかは front・front_right・right・back_right・back・back_left・left・front_left（低い段）、top（一番高い写真）、front_high。
+手で作り直すときは `tools/claude-pack/.build/release/memoria-pack <sessionId の先頭> --force`（背景を透明にした `views/<向き>_cutout.png` も要るときは `--cutouts`）。
 
 ## 1 つのセッションの中身（`sessions/<sessionId>/`）
 

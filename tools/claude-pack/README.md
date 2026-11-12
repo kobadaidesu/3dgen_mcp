@@ -15,7 +15,7 @@
 ```sh
 cd tools/claude-pack
 swift build -c release
-.build/release/memoria-pack <セッションのフォルダ | sessionId | sessionId の先頭> [--data-dir captures] [--force]
+.build/release/memoria-pack <セッションのフォルダ | sessionId | sessionId の先頭> [--data-dir captures] [--force] [--cutouts]
 
 # 例
 .build/release/memoria-pack CEB6
@@ -24,7 +24,8 @@ swift build -c release
 | オプション | 意味 |
 |---|---|
 | `--data-dir` | 受信フォルダ（既定：今のフォルダから上へ探した `captures/`、無ければリポジトリの `captures/`） |
-| `--force` | 作り直す。既定では、同じ manifestHash・同じツールの版で作った `for_claude/<sessionId>/` があれば何もしない |
+| `--force` | 作り直す。既定では、同じ manifestHash・同じツールの版・同じオプションで作った `for_claude/<sessionId>/` があれば何もしない |
+| `--cutouts` | `views/<向き>_cutout.png`（iPhone のマスクの外を透明にした PNG）も作る。既定では作らない（読み手は写真を見る AI なので、背景付きの写真を渡す） |
 
 受信サーバー（`receiver/memoria_receiver.py`）は、セッションを受け取るたびに `.build/release/memoria-pack` があれば裏で動かします（受信の応答は待たせない。失敗はログに 1 行）。無ければ、ビルドの方法を一度だけ表示します。
 
@@ -35,23 +36,27 @@ swift build -c release
 ```
 brief.md                 最初に読む説明（日本語）：作品名、実寸と誤差と求め方、座標の決まり、写真の一覧（方位・仰角・距離・photoId）、
                          撮れている範囲（仰角の範囲・底面は無い・写真の無い向き）、使えない切り抜き、AI での使い方、出どころ
-overview.jpg             選んだ写真の一覧（3 × 4。カメラが立っていた位置に並べ、上から見た配置で正面が下、中央が上から）と実寸。長い辺 2000 px 以下
-views/<向き>.jpg          まっすぐに回し（displayRotationDegClockwise）、作品のまわりで切り抜いた写真。長い辺 1568 px 以下、元より大きくしない
-views/<向き>_cutout.jpg   同じ範囲で、マスクの外を灰色（#7f7f7f）にしたもの（縁は 1 px ほどぼかす）。使える切り抜きが無い向きは作らない
+overview.jpg             選んだ写真の一覧（3 × 4、ai5 は 3 × 3。カメラが立っていた位置に並べ、上から見た配置で正面が下、中央が上から）と実寸。長い辺 2000 px 以下
+views/<向き>.jpg          まっすぐに回し（displayRotationDegClockwise）、作品のまわりで切り抜いた写真（背景は写ったまま）。長い辺 1568 px 以下、元より大きくしない
+views/<向き>_cutout.png   `--cutouts` のときだけ：同じ範囲で、iPhone のマスクを透明度にした PNG（マスクの外は透明、縁は 1 px ほどぼかす）。使える切り抜きが無い向きは作らない
 measurements.json        実寸（下の「実寸の測り方」）
-hull.obj                 visual hull の粗い形（ボクセルの外側の面。メートル、+Y が上、+Z が正面、y = 0 が机の面）
+hull.obj                 visual hull の粗い形（ボクセルの外側の面。メートル、+Y が上、+Z が正面、y = 0 が机の面）。hull を作れたときだけ
 pack.json                写真の選び方（向きごとの photoId・実際の方位と仰角・切り抜きの範囲）、撮れている範囲、使えない切り抜き、出どころ、時間
 ```
 
 ### 向きと写真の選び方
 
-向きは `front`（方位 0°）・`front_right`（45°）・`right`（90°）・`back_right`（135°）・`back`（180°）・`back_left`（225°）・`left`（270°）・`front_left`（315°）を一番低い段（撮影方向の一覧の一番低い仰角、今は 20°）で、`top`（仰角 70° に一番近い写真。40° 以上、かつ一番低い段 ＋ 20° 以上）、`front_high`（方位 0°・仰角 45°）。
+**AI 用 5 方向（`directionPlan.id` が `ai5`）のセッション**：向きは `front`・`right`・`back`・`left`（それぞれ `a000-e15`・`a090-e15`・`a180-e15`・`a270-e15`）と `top`（`top-e90`、方位は問わない）の 5 つだけです。それぞれ、その方向として撮った写真（`direction.targetId` が同じ）を一番に選びます。`top` は仰角 60° 以上（アプリは 75° 以上で撮る）。
+
+ほかのセッション：向きは `front`（方位 0°）・`front_right`（45°）・`right`（90°）・`back_right`（135°）・`back`（180°）・`back_left`（225°）・`left`（270°）・`front_left`（315°）を一番低い段（撮影方向の一覧の一番低い仰角、今は 20°）で、`top`（仰角 70° に一番近い写真。40° 以上、かつ一番低い段 ＋ 20° 以上）、`front_high`（方位 0°・仰角 45°）。
 
 - 必ず守ること：方向が確定（`direction.confirmed`）、方向の確定した写真が一番多い基準（`referenceFrameId`。同じ数なら後の基準）、置き換え済みでない（アプリと同じ決まり）、許容の中（低い段は方位 ±25°・仰角 ±15°、`front_high` は仰角 ±12°）。
 - その中で、使える切り抜き（`confirmed`、または `candidate` で `check` が `ok`）→ 確かめていない切り抜き（`check` の無い前の版）→ 使えない切り抜き、の順。次に保存した写真の画質（`quality.saved` の blur・brightness が ok）、次に角度の近さ。1 枚の写真は 1 つの向きにだけ使う。
 - 切り抜く範囲：マスクの外接長方形に、長い辺の 20% の余白を足し、縦横比を 4:3 以内に広げ、写真の内側へずらす。マスクが使えないときは、作品の円柱を投影した範囲（`MaskCropPlanner.projectObject`）。
 
 ### 実寸の測り方（visual hull）
+
+使えるマスクのある写真が 8 枚未満（ai5 の 5 枚など）のときは hull を作りません（数枚の輪郭から削った箱は、見かけより不確かなため）。代わりに、撮影時にユーザーが AR のガイドで合わせた円柱（直径 × 直径 × 高さ）を `status: "approximate"`・`method: "userCylinder"`・`confidence: "low"` で書き、`brief.md` にも「目安。実測ではありません」と書きます。`hull.obj` は作りません。
 
 1. 多数派の基準の、追跡が `normal` で使える（または確かめていない）マスクのある写真を全部使う（白いマウスでは 49 枚）。マスクは 1/4（長い辺 1008 px）に縮める。
 2. 基準の円柱（`referenceFrames[].object`、無ければ `object`）の半径・高さの 1.3 倍の範囲を 2 mm のボクセルに分け（多すぎると 160³ を上限に粗くする）、基準点の下にも半径の半分まで広げる。
@@ -75,5 +80,6 @@ pack.json                写真の選び方（向きごとの photoId・実際�
 ## 確認
 
 ```sh
-swift test   # 写真の選び方（角度・切り抜き・置き換え済み・基準）、切り抜きと回転の計算と画素、合成した箱の visual hull（大きさ・机の面）、JSON の形
+swift test   # 写真の選び方（角度・切り抜き・置き換え済み・基準・ai5 の 5 方向）、切り抜きと回転の計算と画素、透明の cutout、合成した箱の visual hull（大きさ・机の面）、
+             # 5 方向のセッションの出力（背景付きの写真だけ・円柱の目安・--cutouts）、JSON の形
 ```

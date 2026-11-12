@@ -30,7 +30,7 @@ public enum Overview {
     }
 
     public static func render(tiles: [Tile], footer: [String]) throws -> CGImage {
-        let cols = 3, rows = 4
+        let cols = 3, rows = tiles.contains { $0.name == "front_high" } ? 4 : 3
         let cellH = tile + labelHeight
         let width = cols * tile + (cols + 1) * gap
         let height = rows * cellH + (rows + 1) * gap + footerHeight

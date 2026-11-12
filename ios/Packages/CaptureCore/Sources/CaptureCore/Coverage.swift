@@ -4,16 +4,17 @@ import simd
 /// 撮影方向の当てはめ・撮影済みの方向・次に撮る方向。
 public enum Coverage {
     /// 方位角・仰角に当てはまる方向（許容の中で一番近いもの。同じ近さなら一覧の順で先のもの）。
-    /// 方位角が分からない（正面が決まっていない）ときは nil。
+    /// 方位角が分からない（正面が決まっていない）ときは nil。方位を問わない方向（真上）は仰角だけで比べる
+    /// （真上では水平の成分がほぼ 0 で、方位が定まらないため）。
     public static func match(azimuthDeg: Double?, elevationDeg: Double?, plan: DirectionPlan) -> DirectionTarget? {
-        guard let azimuthDeg, let elevationDeg else { return nil }
+        guard let azimuthDeg, let elevationDeg, azimuthDeg.isFinite, elevationDeg.isFinite else { return nil }
         var best: (target: DirectionTarget, score: Double)?
         for target in plan.targets {
-            let dAz = Geometry.angleDistance(azimuthDeg, target.azimuthDeg)
+            let dAz = target.azimuthDistance(from: azimuthDeg)
             let dEl = abs(elevationDeg - target.elevationDeg)
             guard dAz <= target.azimuthToleranceDeg, dEl <= target.elevationToleranceDeg else { continue }
             // 許容で割って比べる（方位と仰角で許容が違うため）。
-            let score = dAz / max(target.azimuthToleranceDeg, 1e-6) + dEl / max(target.elevationToleranceDeg, 1e-6)
+            let score = (target.anyAzimuth ? 0 : dAz / max(target.azimuthToleranceDeg, 1e-6)) + dEl / max(target.elevationToleranceDeg, 1e-6)
             if best == nil || score < best!.score {
                 best = (target, score)
             }
@@ -36,9 +37,10 @@ public enum Coverage {
     }
 
     /// 正面（方位 0°）の方向のうち、仰角が一番近いもの（同じ近さなら一覧の順で先）。正面の 1 枚目の高さの案内に使う。
+    /// 方位を問わない方向（真上）は正面にならない。
     public static func frontTarget(plan: DirectionPlan, elevationDeg: Double) -> DirectionTarget? {
         plan.targets
-            .filter { Geometry.angleDistance($0.azimuthDeg, 0) < 0.5 }
+            .filter { !$0.anyAzimuth && Geometry.angleDistance($0.azimuthDeg, 0) < 0.5 }
             .min { abs($0.elevationDeg - elevationDeg) < abs($1.elevationDeg - elevationDeg) }
     }
 
@@ -76,12 +78,14 @@ public struct DirectionContext: Equatable, Sendable {
     public var nextBandIsNew: Bool
     /// 段が 2 つ以上ある一覧か（案内に高さを入れる）。
     public var hasMultipleBands: Bool
+    /// 方向を「正面・右・後ろ・左・真上」の名前で案内する一覧か（ai5）。
+    public var usesStepNames: Bool
 
     public init(
         azimuthDeg: Double?, elevationDeg: Double, distanceM: Double, matchedTarget: DirectionTarget?,
         matchedTargetCovered: Bool, nextTarget: DirectionTarget?, coveredCount: Int, totalCount: Int,
         frontTarget: DirectionTarget? = nil, retakeTargetIds: Set<String> = [], travelDeg: Double? = nil,
-        nextBandIsNew: Bool = false, hasMultipleBands: Bool = false
+        nextBandIsNew: Bool = false, hasMultipleBands: Bool = false, usesStepNames: Bool = false
     ) {
         self.azimuthDeg = azimuthDeg
         self.elevationDeg = elevationDeg
@@ -96,6 +100,7 @@ public struct DirectionContext: Equatable, Sendable {
         self.travelDeg = travelDeg
         self.nextBandIsNew = nextBandIsNew
         self.hasMultipleBands = hasMultipleBands
+        self.usesStepNames = usesStepNames
     }
 
     /// 正面の 1 枚目の高さ（仰角）が、正面の方向の許容の中か。正面が決まっている・正面の方向が無いときは nil。
@@ -128,7 +133,8 @@ public struct DirectionContext: Equatable, Sendable {
             coveredCount: coveredCount, totalCount: plan.targets.count,
             frontTarget: azimuth == nil ? Coverage.frontTarget(plan: plan, elevationDeg: elevation) : nil,
             retakeTargetIds: retake.intersection(plan.targets.map(\.id)).subtracting(covered),
-            travelDeg: azimuth == nil ? nil : step?.travelDeg, nextBandIsNew: nextBandIsNew, hasMultipleBands: bands.count > 1
+            travelDeg: azimuth == nil ? nil : step?.travelDeg, nextBandIsNew: nextBandIsNew, hasMultipleBands: bands.count > 1,
+            usesStepNames: plan.usesStepNames
         )
     }
 
@@ -138,24 +144,34 @@ public struct DirectionContext: Equatable, Sendable {
         if allCovered { return "すべての方向を撮影しました。追加で撮るか、確認へ進んでください" }
         if isOnUncoveredTarget {
             if let matchedTarget, retakeTargetIds.contains(matchedTarget.id) {
-                return "\(Self.label(matchedTarget)) を撮り直します。この方向で撮影できます"
+                return "\(Self.label(matchedTarget, named: usesStepNames)) を撮り直します。この方向で撮影できます"
             }
+            if usesStepNames, let name = matchedTarget?.stepName { return "\(name)：この方向で撮影できます" }
             return "この方向で撮影できます"
         }
         guard let next = nextTarget else { return "すべての方向を撮影しました" }
         let retakePrefix = retakeTargetIds.contains(next.id)
-            ? "\(Self.label(next)) の写真の切り抜きがうまくいきませんでした。もう一度撮ります。" : ""
+            ? "\(Self.label(next, named: usesStepNames)) の写真の切り抜きがうまくいきませんでした。もう一度撮ります。" : ""
         let dEl = next.elevationDeg - elevationDeg
         let elevationOff = abs(dEl) > next.elevationToleranceDeg
+        // 方位を問わない方向（真上）：高さだけを合わせる（回る向きは言わない）。
+        if next.anyAzimuth {
+            return retakePrefix + (elevationOff ? Self.elevationMessage(target: next, currentElevationDeg: elevationDeg) : "この方向で撮影できます")
+        }
         // 新しい高さの 1 周を始めるときは、まず高さを伝える。
         if elevationOff && nextBandIsNew {
             return retakePrefix + Self.bandStartMessage(next, fromElevationDeg: elevationDeg)
         }
-        let dAz = travelDeg ?? Geometry.signedAngleDifference(from: azimuthDeg, to: next.azimuthDeg)
+        // 真上の近くでは方位が定まらないので、回る向きより先に高さを戻してもらう。
+        if elevationOff && elevationDeg >= Geometry.unstableAzimuthElevationDeg {
+            return retakePrefix + Self.elevationMessage(target: next, currentElevationDeg: elevationDeg)
+        }
+        let dAz = travelDeg ?? next.travel(from: azimuthDeg)
         if abs(dAz) > next.azimuthToleranceDeg {
             let side = dAz > 0 ? "右" : "左"
             let prefix = retakePrefix.isEmpty && matchedTargetCovered ? "この方向は撮影済みです。" : ""
-            return "\(retakePrefix)\(prefix)もう少し\(side)へ回ってください（あと \(Int(abs(dAz).rounded()))°）"
+            let stepPrefix = retakePrefix.isEmpty && usesStepNames ? next.stepName.map { "次は\($0)です。" } ?? "" : ""
+            return "\(retakePrefix)\(prefix)\(stepPrefix)もう少し\(side)へ回ってください（あと \(Int(abs(dAz).rounded()))°）"
         }
         if elevationOff {
             return retakePrefix + Self.elevationMessage(target: next, currentElevationDeg: elevationDeg)
@@ -166,9 +182,16 @@ public struct DirectionContext: Equatable, Sendable {
     /// 高く上から撮る方向（これ以上の仰角）は、スマホを上げて下に傾ける案内にする。
     public static let raisePhoneElevationDeg: Double = 60
 
+    /// 真上（方位を問わない方向）を撮るときの案内。
+    public static let topMessage = "最後に真上から撮ります。iPhone を作品の真上に持ち上げて、画面を下に向けてください"
+
     /// 高さが合っていないときの案内（同じ段の中）。
     static func elevationMessage(target: DirectionTarget, currentElevationDeg: Double) -> String {
         let now = Int(currentElevationDeg.rounded()), goal = DirectionTarget.formatDegrees(target.elevationDeg)
+        if target.anyAzimuth {
+            let lowest = DirectionTarget.formatDegrees(target.elevationDeg - target.elevationToleranceDeg)
+            return topMessage + "（高さ \(now)° → \(lowest)° 以上）"
+        }
         let heights = "（高さ \(now)° → \(goal)°）"
         if target.elevationDeg > currentElevationDeg {
             if target.elevationDeg >= raisePhoneElevationDeg {
@@ -181,6 +204,7 @@ public struct DirectionContext: Equatable, Sendable {
 
     /// 新しい高さの 1 周を始めるときの案内（例：「次は少し上から（45°）一周します」）。
     public static func bandStartMessage(_ target: DirectionTarget, fromElevationDeg current: Double) -> String {
+        if target.anyAzimuth { return topMessage }
         let goal = DirectionTarget.formatDegrees(target.elevationDeg)
         if target.elevationDeg < current {
             return "次は低い位置（\(goal)°）に戻って撮ります。スマホを下げてください"
@@ -200,8 +224,11 @@ public struct DirectionContext: Equatable, Sendable {
         return "正面の 1 枚目は、\(move)撮ってください（高さ \(now)° → \(goal)°）"
     }
 
-    /// 方向の短い名前（「45°」「22.5°」。低い段より上の方向は「90°・高さ 50°」）。
-    public static func label(_ target: DirectionTarget) -> String {
+    /// 方向の短い名前（「45°」「22.5°」。低い段より上の方向は「90°・高さ 50°」、方位を問わない方向は「真上」）。
+    /// `named` なら（ai5）、前後左右も「正面」「右」「後ろ」「左」。
+    public static func label(_ target: DirectionTarget, named: Bool = false) -> String {
+        if target.anyAzimuth { return target.stepName ?? "上" }
+        if named, let name = target.stepName { return name }
         let az = "\(DirectionTarget.formatDegrees(target.azimuthDeg))°"
         return target.elevationDeg > 30 ? az + "・高さ \(DirectionTarget.formatDegrees(target.elevationDeg))°" : az
     }

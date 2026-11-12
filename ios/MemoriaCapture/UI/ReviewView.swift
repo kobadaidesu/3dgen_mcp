@@ -190,6 +190,14 @@ struct PhotoGroup: Identifiable {
         let photos = session.photos.sorted { $0.sequence < $1.sequence }
         let plan = session.directionPlan
         let bands = plan.bands
+        if plan.usesStepNames {
+            // 正面・右・後ろ・左・真上の順（撮り直しは撮影順）。一覧の外の写真は最後。
+            let order = Dictionary(uniqueKeysWithValues: plan.targets.enumerated().map { ($1.id, $0) })
+            let sorted = photos.sorted {
+                (order[$0.direction.targetId ?? ""] ?? Int.max, $0.sequence) < (order[$1.direction.targetId ?? ""] ?? Int.max, $1.sequence)
+            }
+            return [PhotoGroup(id: "all", title: nil, photos: sorted)]
+        }
         guard bands.count > 1 else { return [PhotoGroup(id: "all", title: nil, photos: photos)] }
         var byBand: [String: [(azimuth: Double, photo: Photo)]] = [:]
         var others: [Photo] = []
@@ -274,7 +282,7 @@ struct PhotoCell: View {
 
     private var directionLabel: String {
         if let target = session.directionPlan.target(id: photo.direction.targetId) {
-            return "\(DirectionTarget.formatDegrees(target.azimuthDeg))°・高さ \(DirectionTarget.formatDegrees(target.elevationDeg))°"
+            return session.directionPlan.displayName(of: target)
         }
         if let az = photo.direction.azimuthDeg {
             return "\(Int(az.rounded()))°（追加）"

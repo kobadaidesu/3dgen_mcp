@@ -170,8 +170,14 @@ final class SceneOverlay {
                 continue
             }
             node.isHidden = false
-            let az = Geometry.radians(target.azimuthDeg), el = Geometry.radians(target.elevationDeg)
-            let local = center + distance * SIMD3(sin(az) * cos(el), sin(el), cos(az) * cos(el))
+            let local: SIMD3<Double>
+            if target.anyAzimuth {
+                // 方位を問わない方向（真上）：作品の真上、円柱の上面より上に 1 つ。
+                local = SIMD3(0, max(heightM / 2 + distance, heightM + 0.1), 0)
+            } else {
+                let az = Geometry.radians(target.azimuthDeg), el = Geometry.radians(target.elevationDeg)
+                local = center + distance * SIMD3(sin(az) * cos(el), sin(el), cos(az) * cos(el))
+            }
             let world = objectToWorld * SIMD4(local, 1)
             node.simdPosition = SIMD3(Float(world.x), Float(world.y), Float(world.z))
             let color: UIColor

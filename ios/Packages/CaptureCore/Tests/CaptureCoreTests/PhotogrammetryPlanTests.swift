@@ -8,7 +8,6 @@ final class PhotogrammetryPlanTests: XCTestCase {
     let plan = DirectionPlanPreset.photogrammetry.plan
 
     func testPresetHasThreeBandsAnd48UniqueTargets() {
-        XCTAssertEqual(DirectionPlanPreset.default, .photogrammetry)
         XCTAssertEqual(plan.id, "photogrammetry")
         XCTAssertEqual(plan.targets.count, 48)
         XCTAssertEqual(Set(plan.targets.map(\.id)).count, 48)
@@ -39,7 +38,8 @@ final class PhotogrammetryPlanTests: XCTestCase {
         XCTAssertEqual(DirectionTarget.makeId(azimuthDeg: 7.5, elevationDeg: -5), "a007.5-em05")
         // 前の一覧の id は変わらない。
         XCTAssertEqual(DirectionPlanPreset.ring8.plan.targets.map(\.id).first, "a000-e20")
-        let pattern = try! NSRegularExpression(pattern: "^a[0-9]{3}(\\.[0-9])?-em?[0-9]{2}$")
+        // 方位を問わない方向（真上）は `top-e90` の形。
+        let pattern = try! NSRegularExpression(pattern: "^(a[0-9]{3}(\\.[0-9])?|top)-em?[0-9]{2}$")
         for id in DirectionPlanPreset.allCases.flatMap({ $0.plan.targets.map(\.id) }) {
             XCTAssertNotNil(pattern.firstMatch(in: id, range: NSRange(id.startIndex..., in: id)), id)
         }

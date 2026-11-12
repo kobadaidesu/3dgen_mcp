@@ -48,8 +48,10 @@ public struct CaptureRoute: Equatable, Sendable {
     }
 
     /// 今の方位と撮影済みの方向で、歩いている向きと今の段を更新する。
-    public mutating func update(azimuthDeg: Double?, plan: DirectionPlan, covered: Set<String>) {
-        if let azimuthDeg {
+    /// `elevationDeg` が `Geometry.unstableAzimuthElevationDeg` 以上（ほぼ真上）のときは方位が定まらないので、歩く向きには数えない。
+    public mutating func update(azimuthDeg: Double?, elevationDeg: Double? = nil, plan: DirectionPlan, covered: Set<String>) {
+        let steady = elevationDeg.map { $0 < Geometry.unstableAzimuthElevationDeg } ?? true
+        if let azimuthDeg, azimuthDeg.isFinite, steady {
             if let last = lastAzimuthDeg {
                 let d = Geometry.signedAngleDifference(from: last, to: azimuthDeg)
                 if abs(d) <= Self.maxSampleStepDeg {
@@ -89,21 +91,23 @@ public struct CaptureRoute: Equatable, Sendable {
     ) -> RouteStep? {
         let remaining = plan.targets.filter { !covered.contains($0.id) }
         func step(_ target: DirectionTarget) -> RouteStep {
-            RouteStep(target: target, travelDeg: currentAzimuthDeg.map { Geometry.signedAngleDifference(from: $0, to: target.azimuthDeg) } ?? 0)
+            RouteStep(target: target, travelDeg: currentAzimuthDeg.map { target.travel(from: $0) } ?? 0)
         }
         if let preferredTargetId, let preferred = remaining.first(where: { $0.id == preferredTargetId }) {
             return step(preferred)
         }
         guard let band = Self.activeBand(plan: plan, covered: covered, current: bandElevationDeg) else { return nil }
         let candidates = plan.targets.filter { band.contains($0) && !covered.contains($0.id) }
-        guard let azimuth = currentAzimuthDeg else { return candidates.first.map(step) }
+        // 方位を問わない方向（真上）は、どこからでも撮れるので回らなくてよい。
+        if let free = candidates.first(where: \.anyAzimuth) { return RouteStep(target: free, travelDeg: 0) }
+        guard let azimuth = currentAzimuthDeg, azimuth.isFinite else { return candidates.first.map(step) }
 
         guard let walk else {
             // 向きが分からない：一番近い方向（同じ近さなら一覧の順）。
             var best: DirectionTarget?
             var bestDistance = Double.infinity
             for target in candidates {
-                let d = Geometry.angleDistance(azimuth, target.azimuthDeg)
+                let d = target.azimuthDistance(from: azimuth)
                 if d < bestDistance - 1e-9 {
                     best = target
                     bestDistance = d

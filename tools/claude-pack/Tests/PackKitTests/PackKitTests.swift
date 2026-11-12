@@ -206,15 +206,24 @@ final class PackKitTests: XCTestCase {
         }
     }
 
-    func testCutoutBlendsToMidGrey() throws {
-        let photo = ImageOps.makeGrayImage(GrayImage(width: 2, height: 1, pixels: [255, 255]))!
-        let cut = try ImageOps.cutout(photo: photo, alpha: GrayImage(width: 2, height: 1, pixels: [255, 0]))
-        var px = [UInt8](repeating: 0, count: 8)
-        let ctx = CGContext(data: &px, width: 2, height: 1, bitsPerComponent: 8, bytesPerRow: 8,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
-        ctx.draw(cut, in: CGRect(x: 0, y: 0, width: 2, height: 1))
-        XCTAssertEqual(Array(px[0..<3]), [255, 255, 255])
-        for c in 4..<7 { XCTAssertEqual(Int(px[c]), 0x7f, accuracy: 1) }
+    func testTransparentCutoutUsesMaskAsAlpha() throws {
+        let photo = ImageOps.makeGrayImage(GrayImage(width: 3, height: 1, pixels: [200, 200, 200]))!
+        let cut = try ImageOps.transparentCutout(photo: photo, alpha: GrayImage(width: 3, height: 1, pixels: [255, 128, 0]))
+        XCTAssertEqual(cut.alphaInfo, .last)
+        // Written as PNG and read back: alpha survives, colour is untouched (no grey background).
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cutout-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try ImageOps.writePNG(cut, to: url)
+        let back = try ImageOps.loadImage(url)
+        XCTAssertTrue([.last, .premultipliedLast, .first, .premultipliedFirst].contains(back.alphaInfo))
+        var px = [UInt8](repeating: 0, count: 12)
+        let ctx = CGContext(data: &px, width: 3, height: 1, bitsPerComponent: 8, bytesPerRow: 12,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.draw(back, in: CGRect(x: 0, y: 0, width: 3, height: 1))
+        XCTAssertEqual(px[3], 255)
+        XCTAssertEqual(Int(px[7]), 128, accuracy: 1)
+        XCTAssertEqual(px[11], 0)
+        XCTAssertEqual(Int(px[0]), 200, accuracy: 2)
     }
 
     // MARK: - Visual hull on a synthetic scene
@@ -411,6 +420,8 @@ final class PackKitTests: XCTestCase {
     func testOptions() throws {
         let o = try PackOptions.parse(["CEB6", "--data-dir", "x", "--force"])
         XCTAssertEqual(o, PackOptions(session: "CEB6", dataDir: "x", force: true))
+        XCTAssertFalse(o.cutouts)  // no background-removed images unless asked
+        XCTAssertTrue(try PackOptions.parse(["CEB6", "--cutouts"]).cutouts)
         XCTAssertThrowsError(try PackOptions.parse([]))
         XCTAssertThrowsError(try PackOptions.parse(["a", "--nope"]))
     }
@@ -422,5 +433,114 @@ final class PackKitTests: XCTestCase {
         XCTAssertEqual(try SessionLocator.outputDir(located: located).path, data.appendingPathComponent("for_claude/S").path)
         XCTAssertThrowsError(try SessionLocator.checkWritable(data.appendingPathComponent("sessions/S/for_claude"), located: located))
         XCTAssertThrowsError(try SessionLocator.checkWritable(data.appendingPathComponent("incoming/x"), located: located))
+    }
+
+    // MARK: - ai5 (5 views)
+
+    static let ai5 = DirectionPlanPreset.ai5.plan
+
+    func ai5Session(_ photos: [Photo]) -> CaptureSession {
+        var s = session(photos)
+        s.directionPlan = Self.ai5
+        s.object = ObjectSize(heightM: 0.12, radiusM: 0.07)
+        return s
+    }
+
+    func testAi5SessionSelectsTheFiveNamedViews() {
+        let s = ai5Session([
+            photo(1, az: 0, el: 15, target: "a000-e15"), photo(2, az: 92, el: 14, target: "a090-e15"),
+            photo(3, az: 178, el: 17, target: "a180-e15"), photo(4, az: 266, el: 12, target: "a270-e15"),
+            photo(5, az: 30, el: 62),                         // extra high shot, not the top target
+            photo(6, az: 211, el: 84, target: "top-e90"),     // the top: any azimuth
+        ])
+        let r = ViewSelector.select(session: s)
+        XCTAssertEqual(r.choices.map(\.name), ["front", "right", "back", "left", "top"])
+        XCTAssertEqual(r.choices.map(\.photoId), [1, 2, 3, 4, 6].map(Self.pid))
+        XCTAssertEqual(choice("top", r).targetId, "top-e90")
+        XCTAssertTrue(choice("top", r).notes.isEmpty, "\(choice("top", r).notes)")
+        XCTAssertTrue(r.choices.allSatisfy { !$0.isMissing })
+        // the top photo is the top-e90 one even when a lower photo is closer to the front
+        XCTAssertEqual(ViewSlot.slots(for: s).map(\.targetId), ["a000-e15", "a090-e15", "a180-e15", "a270-e15", "top-e90"])
+        // other plans keep the 10 standard slots
+        XCTAssertEqual(ViewSlot.slots(for: session([])).count, 10)
+    }
+
+    func testAi5TopMissingAndOblique() {
+        let none = ai5Session([photo(1, az: 0, el: 15, target: "a000-e15"), photo(2, az: 30, el: 50)])
+        let r = ViewSelector.select(session: none)
+        XCTAssertNil(choice("top", r).photoId)
+        XCTAssertTrue(choice("top", r).missingReason?.contains("60°") ?? false)
+        // an extra 65° photo (outside top-e90's tolerance) is used, but flagged as not a true top view
+        let oblique = ai5Session([photo(1, az: 0, el: 15, target: "a000-e15"), photo(2, az: 30, el: 65)])
+        XCTAssertTrue(choice("top", ViewSelector.select(session: oblique)).notes.contains { $0.contains("not a true top view") })
+    }
+
+    /// Writes a small ai5 session to disk (5 photos with masks) and builds the package: 5 views with their backgrounds,
+    /// no cutouts by default, and the size falls back to the user cylinder (5 silhouettes are too few for a hull).
+    func testAi5PackageWithFiveViewsFallsBackToCylinder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-ai5-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let folder = root.appendingPathComponent("sessions/S", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("photos"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("masks"), withIntermediateDirectories: true)
+        let shots: [(Double, Double, String)] = [(0, 15, "a000-e15"), (90, 15, "a090-e15"), (180, 15, "a180-e15"), (270, 15, "a270-e15"), (40, 88, "top-e90")]
+        var photos: [Photo] = []
+        let W = 64, H = 48
+        for (i, shot) in shots.enumerated() {
+            var p = photo(i + 1, az: shot.0, el: shot.1, target: shot.2)
+            p.image.width = W
+            p.image.height = H
+            p.camera.intrinsicsResolution = PixelSize(width: W, height: H)
+            p.mask.width = W
+            p.mask.height = H
+            var mask = GrayImage(width: W, height: H)
+            for y in 16..<32 { for x in 24..<40 { mask[x, y] = 255 } }
+            try ImageOps.writePNG(ImageOps.makeGrayImage(mask)!, to: folder.appendingPathComponent(p.mask.file!))
+            try ImageOps.writeJPEG(ImageOps.makeGrayImage(GrayImage(width: W, height: H, fill: 180))!, to: folder.appendingPathComponent(p.image.file))
+            photos.append(p)
+        }
+        var s = ai5Session(photos)
+        s.referenceFrames[0].objectToWorld = Matrix4x4(matrix_identity_double4x4)
+        let located = LocatedSession(folder: folder, dataDir: root, session: s, receipt: nil)
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        let summary = try PackBuilder(located: located).build(into: out)
+        XCTAssertTrue(summary.contains("user cylinder"), summary)
+
+        let files = try FileManager.default.contentsOfDirectory(atPath: out.appendingPathComponent("views").path).sorted()
+        XCTAssertEqual(files, ["back.jpg", "front.jpg", "left.jpg", "right.jpg", "top.jpg"])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: out.appendingPathComponent("hull.obj").path))
+
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m.status, "approximate")
+        XCTAssertEqual(m.method, "userCylinder")
+        XCTAssertEqual(m.usableSilhouettes, 5)
+        XCTAssertEqual(m.viewsUsed, 0)
+        XCTAssertEqual(m.sizeCm, Size3(width: 14, depth: 14, height: 12))
+        XCTAssertEqual(m.confidence, "low")
+        XCTAssertNil(m.mesh)
+        XCTAssertNil(m.uncertainty)
+
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("大きさ（目安。実測ではありません）"))
+        XCTAssertTrue(brief.contains("信頼度は低め"))
+        XCTAssertTrue(brief.contains("真上（top）"))
+        XCTAssertFalse(brief.contains("_cutout"), "brief must not point at cutouts that were not written")
+        XCTAssertFalse(brief.contains("hull.obj` を読み込んで"))
+        let index = try JSONDecoder().decode(PackIndex.self, from: Data(contentsOf: out.appendingPathComponent("pack.json")))
+        XCTAssertEqual(index.views.map(\.name), ["front", "right", "back", "left", "top"])
+        XCTAssertTrue(index.views.allSatisfy { $0.cutoutFile == nil })
+        XCTAssertEqual(index.provenance.cutouts, false)
+
+        // --cutouts: transparent PNGs next to the photos, and the brief mentions them.
+        let builder = PackBuilder(located: located)
+        builder.writeCutouts = true
+        _ = try builder.build(into: out)
+        let withCutouts = try FileManager.default.contentsOfDirectory(atPath: out.appendingPathComponent("views").path)
+        XCTAssertEqual(withCutouts.filter { $0.hasSuffix("_cutout.png") }.count, 5)
+        XCTAssertFalse(withCutouts.contains { $0.hasSuffix("_cutout.jpg") })
+        let cut = try ImageOps.loadImage(out.appendingPathComponent("views/front_cutout.png"))
+        XCTAssertNotEqual(cut.alphaInfo, .none)
+        XCTAssertNotEqual(cut.alphaInfo, .noneSkipLast)
+        XCTAssertTrue(try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8).contains("_cutout.png"))
     }
 }

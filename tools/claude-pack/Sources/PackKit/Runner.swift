@@ -7,26 +7,32 @@ public struct PackOptions: Equatable, Sendable {
     public var session: String
     public var dataDir: String?
     public var force = false
+    /// Also write `views/<name>_cutout.png` (transparent, alpha = the iPhone mask). Off by default: the reader is an AI
+    /// that looks at photos, and the photo with its background is what it should see.
+    public var cutouts = false
 
     public static let usage = """
-    usage: memoria-pack <session folder | sessionId | sessionId prefix> [--data-dir DIR] [--force]
+    usage: memoria-pack <session folder | sessionId | sessionId prefix> [--data-dir DIR] [--force] [--cutouts]
 
     Writes <data-dir>/for_claude/<sessionId>/ (views, overview.jpg, measurements.json, hull.obj, brief.md, pack.json)
     from a received session. The session folder itself is never modified.
       --data-dir DIR  receiver data folder (default: nearest captures/ above the current folder, else the repo's captures/)
-      --force         rebuild even when the package is up to date (same manifestHash and tool version)
+      --force         rebuild even when the package is up to date (same manifestHash, tool version and options)
+      --cutouts       also write views/<name>_cutout.png: transparent PNGs cut out with the iPhone mask
     """
 
     public static func parse(_ args: [String]) throws -> PackOptions {
         var session: String?
         var dataDir: String?
         var force = false
+        var cutouts = false
         var i = 0
         while i < args.count {
             let a = args[i]
             switch a {
             case "-h", "--help": throw UsageError("")
             case "--force": force = true
+            case "--cutouts": cutouts = true
             case "--data-dir":
                 guard i + 1 < args.count else { throw UsageError("--data-dir needs a value") }
                 dataDir = args[i + 1]
@@ -40,7 +46,7 @@ public struct PackOptions: Equatable, Sendable {
             i += 1
         }
         guard let session else { throw UsageError("missing session") }
-        return PackOptions(session: session, dataDir: dataDir, force: force)
+        return PackOptions(session: session, dataDir: dataDir, force: force, cutouts: cutouts)
     }
 }
 
@@ -64,11 +70,13 @@ public enum Runner {
         do {
             let located = try SessionLocator.locate(options.session, dataDir: SessionLocator.dataDir(option: options.dataDir))
             let outDir = try SessionLocator.outputDir(located: located)
-            if !options.force, let hash = located.receipt?.manifestHash, isUpToDate(outDir, manifestHash: hash) {
+            if !options.force, let hash = located.receipt?.manifestHash, isUpToDate(outDir, manifestHash: hash, cutouts: options.cutouts) {
                 print("[pack] \(located.session.sessionId): up to date (\(outDir.path)); use --force to rebuild")
                 return 0
             }
-            let result = try PackBuilder(located: located).build(into: outDir)
+            let builder = PackBuilder(located: located)
+            builder.writeCutouts = options.cutouts
+            let result = try builder.build(into: outDir)
             print(result)
             return 0
         } catch let e as UsageError {
@@ -80,10 +88,11 @@ public enum Runner {
         }
     }
 
-    static func isUpToDate(_ outDir: URL, manifestHash: String) -> Bool {
+    static func isUpToDate(_ outDir: URL, manifestHash: String, cutouts: Bool) -> Bool {
         guard let data = try? Data(contentsOf: outDir.appendingPathComponent("pack.json")),
               let index = try? JSONDecoder().decode(PackIndex.self, from: data) else { return false }
         return index.provenance.manifestHash == manifestHash && index.provenance.toolVersion == PackInfo.toolVersion
+            && (index.provenance.cutouts ?? false) == cutouts
     }
 }
 
@@ -93,8 +102,13 @@ public final class PackBuilder {
     var session: CaptureSession { located.session }
     var timings: [String: Double] = [:]
     public var hullSettings = HullSettings()
+    /// Write `views/<name>_cutout.png` (`--cutouts`).
+    public var writeCutouts = false
     /// Long side of the masks used for carving (the stored masks are 4032 px; a quarter is plenty for 2 mm voxels).
     public var hullMaskMaxSide = 1008
+    /// Fewer silhouettes than this: no visual hull (a hull from a handful of views, e.g. the 5 of an `ai5` session,
+    /// is a loose box whose sizes look more precise than they are). The user-fitted cylinder is reported instead.
+    public static let minimumHullViews = 8
 
     public init(located: LocatedSession) {
         self.located = located
@@ -173,14 +187,14 @@ public final class PackBuilder {
         let provenance = PackIndex.Provenance(
             sessionId: session.sessionId, manifestHash: located.receipt?.manifestHash, receivedAt: located.receipt?.receivedAt,
             generatedAt: ISODate.string(now, timeZone: TimeZone(identifier: "UTC")!),
-            tool: PackInfo.toolName, toolVersion: PackInfo.toolVersion, sourceFolder: located.folder.path)
+            tool: PackInfo.toolName, toolVersion: PackInfo.toolVersion, sourceFolder: located.folder.path, cutouts: writeCutouts)
         var files = ["brief.md", "overview.jpg", "measurements.json", "pack.json"]
         if measurements.mesh != nil { files.append("hull.obj") }
         files += choices.flatMap { [$0.file, $0.cutoutFile].compactMap { $0 } }
         timings["total"] = (now.timeIntervalSince(started) * 100).rounded() / 100
 
         let brief = Brief.markdown(session: session, provenance: provenance, choices: choices, measurements: measurements,
-                                   coverage: coverage, maskIssues: maskIssues)
+                                   coverage: coverage, maskIssues: maskIssues, cutouts: writeCutouts)
         try Data(brief.utf8).write(to: dir.appendingPathComponent("brief.md"))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
@@ -190,7 +204,9 @@ public final class PackBuilder {
         try encoder.encode(index).write(to: dir.appendingPathComponent("pack.json"))
 
         let shown = choices.filter { !$0.isMissing }.count
-        let size = measurements.sizeCm.map { String(format: "W %.1f × D %.1f × H %.1f cm ±%.1f", $0.width, $0.depth, $0.height, measurements.uncertainty?.plusMinusCm ?? 0) }
+        let size = measurements.method == "userCylinder"
+            ? measurements.sizeCm.map { String(format: "approx. ⌀ %.1f × H %.1f cm (user cylinder, not measured)", $0.width, $0.height) } ?? "size unavailable"
+            : measurements.sizeCm.map { String(format: "W %.1f × D %.1f × H %.1f cm ±%.1f", $0.width, $0.depth, $0.height, measurements.uncertainty?.plusMinusCm ?? 0) }
             ?? "size unavailable (\(measurements.unavailableReason ?? "?"))"
         return String(format: "[pack] %@: %d/%d views, %@, %d hull views, %.1fs", session.sessionId, shown, choices.count, size,
                       measurements.viewsUsed, timings["total"] ?? 0)
@@ -203,7 +219,8 @@ public final class PackBuilder {
         return String(format: "%@ · %.0f° / %.0f°", c.label, az, el) + (c.maskUse == .good ? "" : " · mask?")
     }
 
-    /// Writes views/<name>.jpg and views/<name>_cutout.jpg. Returns the view image for the overview.
+    /// Writes views/<name>.jpg (the upright crop with its background) and, with `writeCutouts`, views/<name>_cutout.png
+    /// (the same crop, transparent outside the iPhone mask, edges feathered by about a pixel). Returns the view image for the overview.
     func writeView(_ choice: inout ViewChoice, dir: URL) throws -> CGImage? {
         guard let id = choice.photoId, let photo = session.photo(id: id) else { return nil }
         let image = try ImageOps.loadImage(url(photo.image.file))
@@ -236,13 +253,13 @@ public final class PackBuilder {
         choice.cropInPhoto = crop
         choice.outputWidth = out.width
         choice.outputHeight = out.height
-        if let m = mask, let maskImage = ImageOps.makeGrayImage(m) {
+        if writeCutouts, let m = mask, let maskImage = ImageOps.makeGrayImage(m) {
             let alphaImage = try ImageOps.uprightCrop(maskImage, crop: crop, rotationDegClockwise: rotation,
                                                       width: out.width, height: out.height, gray: true)
             let alpha = try ImageOps.gray(alphaImage).boxBlurred()
-            let cut = try ImageOps.cutout(photo: view, alpha: alpha)
-            let cutName = "views/\(choice.name)_cutout.jpg"
-            try ImageOps.writeJPEG(cut, to: dir.appendingPathComponent(cutName))
+            let cut = try ImageOps.transparentCutout(photo: view, alpha: alpha)
+            let cutName = "views/\(choice.name)_cutout.png"
+            try ImageOps.writePNG(cut, to: dir.appendingPathComponent(cutName))
             choice.cutoutFile = cutName
         }
         return view
@@ -301,8 +318,9 @@ public final class PackBuilder {
             }
         }
         m.viewsSkipped.sort { $0.sequence < $1.sequence }
-        guard views.count >= 3 else {
-            m.unavailableReason = "only \(views.count) silhouettes with a usable mask (need 3 or more)"
+        m.usableSilhouettes = views.count
+        guard views.count >= Self.minimumHullViews else {
+            Self.useCylinder(&m, size: size, silhouettes: views.count)
             return m
         }
 
@@ -419,10 +437,33 @@ public final class PackBuilder {
         return m
     }
 
+    /// Too few silhouettes for a hull: report the cylinder the user fitted during capture, clearly labelled as such.
+    static func useCylinder(_ m: inout Measurements, size: ObjectSize, silhouettes: Int) {
+        let d = 2 * size.radiusM, h = size.heightM
+        m.status = "approximate"
+        m.method = "userCylinder"
+        m.sizeM = Size3(width: round6(d), depth: round6(d), height: round6(h))
+        m.sizeCm = Size3(width: round1(d * 100), depth: round1(d * 100), height: round1(h * 100))
+        m.confidence = "low"
+        m.confidenceReasons = ["only \(silhouettes) silhouettes with a usable mask (a visual hull needs \(minimumHullViews) or more); "
+            + "the size is the user-adjusted capture cylinder, not a measurement"]
+        m.frame["origin"] = "x, z: the capture's reference point (base centre); y = 0: the capture's reference point (no table estimate without a hull)"
+        m.caveats = [
+            "Size = the cylinder the user fitted around the object with the AR guide during capture (diameter × diameter × height). "
+                + "It is an eyeballed enclosing guide, not a measurement: the object is usually somewhat smaller, its footprint need not be round, "
+                + "and width/depth are both the diameter.",
+            "No visual hull and no hull.obj: \(silhouettes) silhouettes are too few for a reliable carve (\(minimumHullViews) or more needed).",
+            "Height is from the capture's reference point (the measured base), not from an estimated table plane.",
+        ]
+    }
+
     func footerLines(_ m: Measurements) -> [String] {
         let title = session.title.isEmpty ? "(untitled)" : session.title
         var lines = ["\(title) · session \(session.sessionId.prefix(8)) · tiles placed where the camera stood, seen from above (front at the bottom)"]
-        if let s = m.sizeCm {
+        if m.method == "userCylinder", let s = m.sizeCm {
+            lines.append(String(format: "Approximate size (user-fitted capture cylinder, NOT measured): diameter %.1f cm × height %.1f cm", s.width, s.height))
+            lines.append("Only \(m.usableSilhouettes) silhouettes (a hull needs \(Self.minimumHullViews)+): no visual hull; the object is usually smaller than this cylinder")
+        } else if let s = m.sizeCm {
             lines.append(String(format: "Measured (visual hull, %d views): W %.1f × D %.1f × H %.1f cm (±%.1f cm) · X right, Y up, Z front", m.viewsUsed,
                                 s.width, s.depth, s.height, m.uncertainty?.plusMinusCm ?? 0))
             if let f = m.footprint {

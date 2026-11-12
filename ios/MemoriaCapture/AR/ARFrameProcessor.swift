@@ -191,7 +191,9 @@ final class ARFrameProcessor: NSObject, ARSessionDelegate, @unchecked Sendable {
             var direction: DirectionContext?
             if hasReference, let base = ref.basePoint {
                 let azimuth = ref.objectToWorld.map { Geometry.azimuth(cameraPosition: transform.translation, objectToWorld: $0) }
-                self.route.update(azimuthDeg: azimuth, plan: ref.plan, covered: ref.covered)
+                let elevation = Geometry.elevationAndDistance(cameraPosition: transform.translation, basePoint: base, heightM: ref.heightM).elevationDeg
+                // ほぼ真上では方位が定まらないので、歩く向きには数えない（route が elevation を見て捨てる）。
+                self.route.update(azimuthDeg: azimuth, elevationDeg: elevation, plan: ref.plan, covered: ref.covered)
                 direction = DirectionContext.make(
                     cameraPosition: transform.translation, basePoint: base, heightM: ref.heightM,
                     objectToWorld: ref.objectToWorld, plan: ref.plan, covered: ref.covered,

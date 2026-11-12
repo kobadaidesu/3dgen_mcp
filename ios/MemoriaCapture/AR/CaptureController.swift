@@ -781,7 +781,7 @@ final class CaptureController: ObservableObject {
         let newRetakes = retake.subtracting(lastRetakeIds)
         lastRetakeIds = retake
         if let first = plan.targets.first(where: { newRetakes.contains($0.id) }) {
-            showBanner("\(DirectionContext.label(first)) の写真の切り抜きがうまくいきませんでした。もう一度撮ります", isError: true)
+            showBanner("\(DirectionContext.label(first, named: plan.usesStepNames)) の写真の切り抜きがうまくいきませんでした。もう一度撮ります", isError: true)
         }
         pushReference()
         updateMarkers(next: direction?.nextTarget, force: true)

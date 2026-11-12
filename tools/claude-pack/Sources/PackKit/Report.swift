@@ -3,7 +3,7 @@ import CaptureCore
 
 public enum PackInfo {
     public static let toolName = "memoria-pack"
-    public static let toolVersion = "0.1.0"
+    public static let toolVersion = "0.2.0"
 }
 
 public struct Size3: Codable, Equatable, Sendable {
@@ -58,9 +58,10 @@ public struct Measurements: Codable, Sendable {
     public var schema = "memoria.claude-pack.measurements"
     public var schemaVersion = 1
     public var sessionId: String
-    /// "ok" | "unavailable"
+    /// "ok" (visual hull) | "approximate" (too few silhouettes: `sizeCm` is the user-fitted cylinder, see `method`) | "unavailable"
     public var status: String
     @NullCodable public var unavailableReason: String?
+    /// "visualHull" | "userCylinder" (the cylinder fitted with the AR guide during capture, not a measurement)
     public var method = "visualHull"
     public var frame: [String: String] = [
         "units": "metres (sizeCm in centimetres)",
@@ -93,6 +94,8 @@ public struct Measurements: Codable, Sendable {
     /// Sides of the search box the hull reaches ("x-", "x+", "z-", "z+", "y+"): the object may be larger there.
     public var touchesSearchBox: [String] = []
     public var viewsUsed = 0
+    /// Photos of the reference frame with a usable silhouette (mask). Below `PackBuilder.minimumHullViews` no hull is carved.
+    public var usableSilhouettes = 0
     public var viewsUsedPhotoIds: [String] = []
     public var viewsSkipped: [SkippedView] = []
     public var perViewSlack: [VisualHull.ViewSlack] = []
@@ -114,6 +117,8 @@ public struct PackIndex: Codable, Sendable {
         public var tool: String
         public var toolVersion: String
         public var sourceFolder: String
+        /// Whether `views/*_cutout.png` were written (`--cutouts`). Missing in packages from before the option (they had grey JPG cutouts).
+        public var cutouts: Bool?
     }
 
     public struct Coverage: Codable, Equatable, Sendable {

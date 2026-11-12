@@ -7,6 +7,8 @@ public enum Geometry {
 
     /// 正面のカメラが基準点からこれより水平方向に近い（真上にいる）と、正面の向きが決まらない。
     public static let minimumFrontHorizontalDistance: Double = 0.05
+    /// 仰角がこれ以上（ほぼ真上）だと、水平の成分が小さく方位が定まらない。歩く向きの判定・回る向きの案内に使わない。
+    public static let unstableAzimuthElevationDeg: Double = 75
 
     // MARK: 角度
 
@@ -61,6 +63,8 @@ public enum Geometry {
     /// カメラ位置の方位角（度、0〜360）。作品座標での (x, z) の atan2(x, z)。
     public static func azimuth(cameraPosition: SIMD3<Double>, objectToWorld: simd_double4x4) -> Double {
         let p = objectToWorld.inverse * SIMD4(cameraPosition, 1)
+        // 真上（x = z = 0）でも atan2 は 0 を返す（NaN にならない）。入力が壊れていれば 0。
+        guard p.x.isFinite, p.z.isFinite else { return 0 }
         return normalizeDegrees(degrees(atan2(p.x, p.z)))
     }
 
