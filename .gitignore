@@ -6,3 +6,6 @@ DerivedData/
 __pycache__/
 *.pyc
 /captures/
+
+# Per-machine signing settings (Apple Team ID). See ios/Config/Local.xcconfig.example.
+ios/Config/Local.xcconfig
