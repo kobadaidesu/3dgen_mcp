@@ -7,7 +7,8 @@
 子どもの絵や工作を 3D モデルにするときの **入力の写真をそろえる** ためのリポジトリです。iPhone のアプリで作品のまわりを撮り、同じネットワークの Mac へ送り、AI エージェントが読みやすい形にまとめるところまでを持ちます。
 
 - **3D の生成そのものは範囲の外です。** 生成は、Claude Code・Codex などの AI エージェントが、ここで作ったデータを読んで行います。生成のアルゴリズムや特定の生成サービスへの接続は、このリポジトリに入れません。
-- 例外として、**平らな作品（貼り絵・紙に描いた絵）を写真 1 枚から GLB にするツール** `tools/flat-art-glb/` を置いています（ユーザーが決めたもの）。撮影アプリや `for_claude/` の流れとはつながっておらず、写真 1 枚と設定ファイルから単独で動きます。立体の作品の生成は、引き続き範囲の外です。
+- 例外として、**平らな作品（貼り絵・紙に描いた絵）を写真 1 枚から GLB にするツール** `tools/flat-art-glb/` を置いています（ユーザーが決めたもの）。撮影アプリや `for_claude/` の流れとはつながっておらず、写真 1 枚と設定ファイルから単独で動きます。
+- 同じく例外として、**上が平らな単純な立体（箱・板・操作盤など）を数枚の写真から GLB にするツール** `tools/solid-glb/` を置いています（ユーザーが決めたもの）。これも撮影の流れとはつながっておらず、写真と設定ファイルから単独で動きます。形はプログラムが組み立て、AI は写真を見て設定ファイルを書きます。生成 AI は使いません。それ以外の立体の作品の生成は、引き続き範囲の外です。
 - 今の方針（ユーザーが決めたもの）は **「AI に推論させながら作る」** です。正面・右・後ろ・左の 4 方向と、最後に真上から撮る **5 枚の撮影（`ai5`）** を、新しいセッションの既定にしています。数枚のよい写真から AI が形を推論する前提なので、写真どうしの重なりは要りません。
 - 立体の作品の撮り方の案内は、**向きで案内する方法（`guidance: "heading"`）** を新しいセッションの既定にしています（ユーザーの案）。作品を画面の中央の十字に合わせて正面を撮り、iPhone の向きが 90°・180°・270° 回った位置と真上で撮ります。底の中心・円柱の設定はありません。作品の位置と大きさは、撮ったあとに写真から求めます。**新しい方法で、実機ではまだ試していません**（下の「未対応・予定」）。前の方法（底の中心と円柱を決めてから撮る `baseCylinder`）は設定で選べ、48 方向（`photogrammetry`）などほかの一覧はいつも前の方法です。
 - 新しいセッションを作るときに、撮る人が作品の種類を選びます。**立体（工作・粘土など）** は上の `ai5`、**平面（絵・貼り絵など）** は真上から 1 枚（`flat1`）です。どちらにするかは人が決め、アプリは自動で見分けません。
@@ -24,6 +25,7 @@
 | `mcp-server/` | Python（MCP の SDK は uv が入れる。中身の `memoria_core.py` は標準ライブラリだけ） | Claude Code・Codex から撮影データを読む MCP サーバー（`list_sessions`・`get_brief`・`get_view` など） |
 | `tools/reconstruct/` | Swift（Apple シリコンの Mac、macOS 14 以上） | `memoria-reconstruct`。RealityKit の `PhotogrammetrySession` で写真から USDZ を作る実験用のツール |
 | `tools/flat-art-glb/` | Python（numpy・OpenCV・mapbox_earcut）。確かめには Node.js（three・gltf-validator）と Playwright | 平らな作品の写真 1 枚から GLB を作る関数の集まりとコマンド（`flatart_glb.py`）。撮影の流れとは別に単独で動く。説明は `tools/flat-art-glb/README.md` |
+| `tools/solid-glb/` | Python（numpy・OpenCV・mapbox_earcut）。確かめには Node.js（three・gltf-validator）と Playwright | 上が平らな単純な立体を、真上の写真と設定ファイルから GLB にするコマンド（`solidglb.py`）。輪郭をなぞった層を積み、上面に写真を貼り、丸い部品を載せる。撮影の流れとは別に単独で動く。説明は `tools/solid-glb/README.md` |
 | `docs/` | 取り決め | `data-format.md`（session.json の形・座標・画像の向き・撮影方向の一覧・マスクの確かめ）、`transfer-protocol.md`（iPhone → Mac の転送の手順と、同じネットワークの中だけにする決まり） |
 | `captures/` | 受け取ったデータ（git に入らない） | 受信サーバーが作る。読み方は受信サーバーが起動のたびに書き直す `captures/README.md` |
 
@@ -90,6 +92,7 @@ tools/claude-pack/.build/release/memoria-pack <sessionId の先頭> --force --cu
 python3 -m unittest discover -s receiver/tests
 python3 -m unittest discover -s mcp-server/tests
 python3 -m unittest discover -s tools/flat-art-glb/tests   # numpy・OpenCV・mapbox_earcut が要る
+python3 -m unittest discover -s tools/solid-glb/tests      # numpy・OpenCV・mapbox_earcut が要る
 ```
 
 iPhone のアプリのビルド：
