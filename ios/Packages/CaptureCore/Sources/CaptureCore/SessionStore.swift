@@ -26,6 +26,7 @@ public enum SessionStoreError: Error, Equatable, LocalizedError {
 /// ```
 /// <root>/Sessions/<sessionId>/
 ///   session.json   photos/<photoId>.jpg   masks/<photoId>.png
+///   rectified/<photoId>.jpg   平面の作品の、遠近を直した画像（作れたときだけ）
 ///   transfer.json  転送の状態（転送しない）
 ///   local.json     撮影順の控え・ハッシュの控え（転送しない）
 /// ```
@@ -82,6 +83,10 @@ public final class SessionStore: @unchecked Sendable {
 
     public func maskURL(_ sessionId: String, photoId: String) -> URL {
         fileURL(sessionId, path: Photo.maskPath(photoId: photoId))
+    }
+
+    public func rectifiedURL(_ sessionId: String, photoId: String) -> URL {
+        fileURL(sessionId, path: Photo.rectifiedPath(photoId: photoId))
     }
 
     private func transferURL(_ sessionId: String) -> URL {
@@ -158,10 +163,10 @@ public final class SessionStore: @unchecked Sendable {
         }
     }
 
-    public func createSession(title: String, device: DeviceInfo, plan: DirectionPlan, now: Date = Date()) throws -> CaptureSession {
+    public func createSession(title: String, device: DeviceInfo, plan: DirectionPlan, workKind: WorkKind = .object, now: Date = Date()) throws -> CaptureSession {
         lock.lock(); defer { lock.unlock() }
         let id = Self.newId()
-        let session = CaptureSession(sessionId: id, title: title, createdAt: now, device: device, directionPlan: plan)
+        let session = CaptureSession(sessionId: id, title: title, createdAt: now, device: device, directionPlan: plan, workKind: workKind)
         let dir = sessionDirectory(id)
         do {
             try fileManager.createDirectory(at: dir.appendingPathComponent("photos"), withIntermediateDirectories: true)
@@ -186,7 +191,8 @@ public final class SessionStore: @unchecked Sendable {
             .sorted { $0.updatedAt > $1.updatedAt }
     }
 
-    /// セッションを読む。写真のファイルが無い写真は一覧から外し、マスクのファイルが無いマスクは失敗にする
+    /// セッションを読む。写真のファイルが無い写真は一覧から外し、マスクのファイルが無いマスクは失敗にし、
+    /// 補正した画像（平面の作品）のファイルが無ければ `flat.rectified` を null にする
     /// （直したら保存し直す。転送中は直さずに返すだけ）。余分なファイルは無視する。
     public func loadSession(_ sessionId: String) throws -> CaptureSession {
         lock.lock(); defer { lock.unlock() }
@@ -203,6 +209,11 @@ public final class SessionStore: @unchecked Sendable {
             let path = session.photos[i].mask.file ?? Photo.maskPath(photoId: session.photos[i].photoId)
             if !fileManager.fileExists(atPath: fileURL(sessionId, path: path).path) {
                 session.photos[i].mask = .failed("maskFileMissing", instanceCount: session.photos[i].mask.instanceCount)
+            }
+        }
+        for i in session.photos.indices {
+            if let file = session.photos[i].flat?.rectified?.file, !fileManager.fileExists(atPath: fileURL(sessionId, path: file).path) {
+                session.photos[i].flat?.rectified = nil
             }
         }
         if session != original && !busySessions.contains(sessionId) {
@@ -227,10 +238,12 @@ public final class SessionStore: @unchecked Sendable {
 
     /// 写真を足す。JPEG を書けてから写真の記録を作り、session.json を書けなかったら JPEG を消して失敗にする。
     /// 撮影順は、削除した写真の番号も使い回さない。
+    /// - Parameter rectifiedJPEG: 平面の作品の、遠近を直した画像（`rectified/<photoId>.jpg` に書く）。
+    ///   書けたら `build` の結果の `flat.rectified.file` をこのファイルにする。書けなければ `flat.rectified` を null にする。
     /// - Parameter build: セッション（基準の正面を決めるために変えてよい）と撮影順から写真の記録を作る。
     @discardableResult
     public func addPhoto(
-        sessionId: String, photoId: String, jpegData: Data, now: Date = Date(),
+        sessionId: String, photoId: String, jpegData: Data, rectifiedJPEG: Data? = nil, now: Date = Date(),
         build: (inout CaptureSession, Int) throws -> Photo
     ) throws -> Photo {
         lock.lock(); defer { lock.unlock() }
@@ -241,21 +254,31 @@ public final class SessionStore: @unchecked Sendable {
         let sequence = max(local.lastSequence, session.photos.map(\.sequence).max() ?? 0) + 1
 
         let photoURL = photoURL(sessionId, photoId: photoId)
+        let rectifiedURL = rectifiedURL(sessionId, photoId: photoId)
         try? fileManager.createDirectory(at: photoURL.deletingLastPathComponent(), withIntermediateDirectories: true)
         try write(jpegData, to: photoURL)
         do {
+            var wroteRectified = false
+            if let rectifiedJPEG {
+                try? fileManager.createDirectory(at: rectifiedURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+                wroteRectified = (try? write(rectifiedJPEG, to: rectifiedURL)) != nil
+            }
             local.lastSequence = sequence
             try saveLocalStateLocked(sessionId, local)
             var photo = try build(&session, sequence)
             photo.photoId = photoId
             photo.sequence = sequence
             photo.image.file = Photo.imagePath(photoId: photoId)
+            if photo.flat?.rectified != nil {
+                if wroteRectified { photo.flat?.rectified?.file = Photo.rectifiedPath(photoId: photoId) } else { photo.flat?.rectified = nil }
+            }
             session.photos.append(photo)
             session.updatedAt = now
             try writeSession(session)
             return photo
         } catch {
             try? fileManager.removeItem(at: photoURL)
+            try? fileManager.removeItem(at: rectifiedURL)
             throw error
         }
     }
@@ -297,6 +320,7 @@ public final class SessionStore: @unchecked Sendable {
         try writeSession(session)
         try? fileManager.removeItem(at: photoURL(sessionId, photoId: photoId))
         try? fileManager.removeItem(at: maskURL(sessionId, photoId: photoId))
+        try? fileManager.removeItem(at: rectifiedURL(sessionId, photoId: photoId))
     }
 
     public func deleteSession(_ sessionId: String) throws {
@@ -363,12 +387,13 @@ public final class SessionStore: @unchecked Sendable {
 
     // MARK: 転送の一覧
 
-    /// 送るファイルの path：session.json、全写真、candidate / confirmed のマスク。
+    /// 送るファイルの path：session.json、全写真、candidate / confirmed のマスク、平面の作品の補正した画像。
     public static func transferPaths(for session: CaptureSession) -> [String] {
         var paths = ["session.json"]
         for photo in session.photos {
             paths.append(photo.image.file)
             if photo.mask.status.hasFile, let file = photo.mask.file { paths.append(file) }
+            if let file = photo.flat?.rectified?.file { paths.append(file) }
         }
         return paths
     }

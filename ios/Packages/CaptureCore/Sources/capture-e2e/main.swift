@@ -1,8 +1,9 @@
 // capture-e2e：小さな合成セッションを作って、受信側（receiver/memoria_receiver.py）へ送る確認ツール（macOS）。
 //
-//   swift run capture-e2e http://127.0.0.1:8765 123456 [--keep]
+//   swift run capture-e2e http://127.0.0.1:8765 123456 [--keep] [--flat]
 //
 // 1. 一時フォルダに SessionStore で合成セッション（写真 3 枚・マスク 2 枚）を作る
+//    --flat のときは平面の作品のセッション（workKind flat・flat1。真上の写真 1 枚・用紙の四隅・実寸・補正した画像）
 // 2. 送る → complete を期待
 // 3. もう一度送る → alreadyComplete を期待
 // 4. 作品名を変えて送る → 新しい manifestHash で complete を期待（受信側は前の版を replaced/ へ）
@@ -39,8 +40,9 @@ func encodeImage(width: Int, height: Int, gray: Bool, type: UTType, draw: (CGCon
 
 let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("--") }
 let keep = CommandLine.arguments.contains("--keep")
+let flatMode = CommandLine.arguments.contains("--flat")
 guard args.count >= 2, let receiverURL = TransferClient.receiverURL(fromUserInput: args[args.startIndex]) else {
-    print("使い方: capture-e2e <受信側の URL（http://IP:port）> <ペアリングコード> [--keep]")
+    print("使い方: capture-e2e <受信側の URL（http://IP:port）> <ペアリングコード> [--keep] [--flat]")
     exit(2)
 }
 let token = args[args.startIndex + 1]
@@ -51,69 +53,145 @@ print("一時フォルダ: \(root.path)")
 
 let device = DeviceInfo(model: "Mac-e2e", systemName: "macOS", systemVersion: ProcessInfo.processInfo.operatingSystemVersionString, appVersion: "0.1.0", appBuild: "1")
 var session: CaptureSession
-do {
-    session = try store.createSession(title: "e2e テスト", device: device, plan: DirectionPlanPreset.ring8.plan)
-    session = try store.updateSession(session.sessionId) { s in
-        s.object = ObjectSize(heightM: 0.15, radiusM: 0.08)
-        s.referenceFrames.append(ReferenceFrame(id: s.nextReferenceFrameId, createdAt: Date(), basePointWorld: SIMD3(0, -0.5, -0.5)))
-    }
-} catch {
-    fail("セッションを作れません: \(error)")
+if flatMode {
+    session = makeFlatSession()
+} else {
+    session = makeObjectSession()
 }
 let sessionId = session.sessionId
-let refId = session.referenceFrames[0].id
 
-let width = 320, height = 240
-let fx = 280.0
-let intrinsics = simd_double3x3(rows: [SIMD3(fx, 0, Double(width) / 2), SIMD3(0, fx, Double(height) / 2), SIMD3(0, 0, 1)])
-for i in 0..<3 {
-    let angle = Double(i) * .pi / 4
-    let base = SIMD3<Double>(0, -0.5, -0.5)
-    let position = base + SIMD3(0.4 * sin(angle), 0.15, 0.4 * cos(angle))
-    // カメラが基準点を向く姿勢（−Z が前）。
-    let forward = simd_normalize(base + SIMD3(0, 0.075, 0) - position)
-    let right = simd_normalize(simd_cross(forward, SIMD3(0, 1, 0)))
-    let up = simd_cross(right, forward)
-    let cameraToWorld = simd_double4x4(columns: (SIMD4(right, 0), SIMD4(up, 0), SIMD4(-forward, 0), SIMD4(position, 1)))
+/// 平面の作品：真上（0.4 m）から見下ろした写真 1 枚。紙（白）の四隅・実寸（机 y = 0 の平面に当てたもの）・補正した画像。
+func makeFlatSession() -> CaptureSession {
+    var session: CaptureSession
+    do {
+        session = try store.createSession(title: "e2e 平面の絵", device: device, plan: DirectionPlanPreset.flat1.plan, workKind: .flat)
+    } catch {
+        fail("セッションを作れません: \(error)")
+    }
+    let width = 640, height = 480
+    let fx = 600.0
+    let intrinsics = simd_double3x3(rows: [SIMD3(fx, 0, Double(width) / 2), SIMD3(0, fx, Double(height) / 2), SIMD3(0, 0, 1)])
+    // 光軸が真下、センサーの右が −Z。
+    let cameraToWorld = simd_double4x4(columns: (SIMD4(0, 0, -1, 0), SIMD4(-1, 0, 0, 0), SIMD4(0, 1, 0, 0), SIMD4(0, 0.4, 0, 1)))
+    let camera = CameraModel(cameraToWorld: cameraToWorld, intrinsics: intrinsics, imageWidth: Double(width), imageHeight: Double(height))
+    // 縦長に見える A5 くらいの紙（0.148 × 0.21 m）：画面の上が −Z。
+    let world: [SIMD3<Double>] = [SIMD3(-0.074, 0, -0.105), SIMD3(0.074, 0, -0.105), SIMD3(0.074, 0, 0.105), SIMD3(-0.074, 0, 0.105)]
+    let pixels = world.map { camera.project($0)! }
+    guard let quad = FlatGeometry.orderCorners(pixels, imageWidth: width, imageHeight: height, rotationDegClockwise: 90) else { fail("四隅") }
+    let size = FlatGeometry.measureSize(corners: quad, camera: camera, imageSize: PixelSize(width: width, height: height),
+                                        planePoint: .zero, planeNormal: SIMD3(0, 1, 0), planeSource: "estimatedPlane")
+    guard let size else { fail("実寸を測れません") }
+    let box = quad.boundingBox
     let jpeg = encodeImage(width: width, height: height, gray: false, type: .jpeg) { c in
-        c.setFillColor(CGColor(red: 0.9, green: 0.85, blue: 0.7, alpha: 1))
+        c.setFillColor(CGColor(red: 0.45, green: 0.35, blue: 0.25, alpha: 1))
         c.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        c.setFillColor(CGColor(red: 0.2 + 0.3 * Double(i), green: 0.3, blue: 0.6, alpha: 1))
-        c.fill(CGRect(x: 110, y: 60, width: 100, height: 120))
+        c.setFillColor(CGColor(red: 0.97, green: 0.97, blue: 0.95, alpha: 1))
+        c.fill(CGRect(x: box.minX, y: Double(height) - box.maxY, width: box.width, height: box.height))
+        c.setFillColor(CGColor(red: 0.9, green: 0.2, blue: 0.2, alpha: 1))
+        c.fillEllipse(in: CGRect(x: box.midX - 40, y: Double(height) - box.midY - 40, width: 80, height: 80))
+    }
+    guard let rs = FlatGeometry.rectifiedSize(corners: quad, size: size) else { fail("補正した画像の大きさ") }
+    let rectified = encodeImage(width: rs.width, height: rs.height, gray: false, type: .jpeg) { c in
+        c.setFillColor(CGColor(red: 0.97, green: 0.97, blue: 0.95, alpha: 1))
+        c.fill(CGRect(x: 0, y: 0, width: rs.width, height: rs.height))
+        c.setFillColor(CGColor(red: 0.9, green: 0.2, blue: 0.2, alpha: 1))
+        c.fillEllipse(in: CGRect(x: Double(rs.width) / 2 - 40, y: Double(rs.height) / 2 - 40, width: 80, height: 80))
     }
     let frame = CapturedFrameInfo(
         cameraToWorld: cameraToWorld, intrinsics: intrinsics, intrinsicsResolution: PixelSize(width: width, height: height),
-        imageSize: PixelSize(width: width, height: height), timestamp: 100 + Double(i), exposureDuration: 0.01,
+        imageSize: PixelSize(width: width, height: height), timestamp: 100, exposureDuration: 0.01,
         exposureOffset: 0, trackingState: .normal, trackingReason: nil
     )
     let context = CaptureContext(
-        trigger: i == 0 ? .manual : .auto, referenceFrameId: refId, liveQuality: .unknown,
-        deviceOrientation: "landscapeLeft", displayRotationDegClockwise: 0, capturedAt: Date()
+        trigger: .auto, referenceFrameId: nil, liveQuality: .unknown,
+        deviceOrientation: "faceUp", displayRotationDegClockwise: FlatGeometry.displayRotation(deviceOrientation: "faceUp"), capturedAt: Date()
+    )
+    let flat = FlatPhotoInfo(
+        corners: quad, cornersMethod: FlatPhotoInfo.visionMethod, cornersConfidence: 0.98,
+        sheetAtFrameEdge: FlatGeometry.touchesFrameEdge(quad, imageWidth: width, imageHeight: height), size: size,
+        rectified: FlatRectifiedImage(file: "", width: rs.width, height: rs.height)
     )
     let photoId = SessionStore.newId()
     do {
-        try store.addPhoto(sessionId: sessionId, photoId: photoId, jpegData: jpeg) { s, sequence in
-            PhotoRecorder.makePhoto(in: &s, photoId: photoId, sequence: sequence, frame: frame, context: context)
+        try store.addPhoto(sessionId: session.sessionId, photoId: photoId, jpegData: jpeg, rectifiedJPEG: rectified) { s, sequence in
+            PhotoRecorder.makeFlatPhoto(session: s, photoId: photoId, sequence: sequence, frame: frame, context: context, flat: flat, distanceM: 0.4)
         }
-        if i < 2 {
-            let png = encodeImage(width: width, height: height, gray: true, type: .png) { c in
-                c.setFillColor(gray: 0, alpha: 1)
-                c.fill(CGRect(x: 0, y: 0, width: width, height: height))
-                c.setFillColor(gray: 1, alpha: 1)
-                c.fill(CGRect(x: 110, y: 60, width: 100, height: 120))
-            }
-            try store.saveMask(sessionId: sessionId, photoId: photoId, pngData: png, mask: MaskInfo(
-                status: i == 0 ? .confirmed : .candidate, width: width, height: height, method: MaskInfo.visionMethod,
-                instanceCount: 1, selectedInstances: [1], selection: .auto
-            ))
-        } else {
-            try store.updateSession(sessionId) { s in
-                if let index = s.photos.firstIndex(where: { $0.photoId == photoId }) { s.photos[index].mask = .failed("e2e: マスクなし") }
-            }
-        }
+        session = try store.loadSession(session.sessionId)
     } catch {
         fail("写真を保存できません: \(error)")
     }
+    guard let p = session.photos.first, p.direction.targetId == "top-e90", p.flat?.rectified != nil else { fail("平面の写真の記録が想定と違います") }
+    print(String(format: "平面の作品：用紙 %.3f × %.3f m、補正した画像 %d × %d", size.widthM, size.heightM, rs.width, rs.height))
+    return session
+}
+
+func makeObjectSession() -> CaptureSession {
+    var session: CaptureSession
+    do {
+        session = try store.createSession(title: "e2e テスト", device: device, plan: DirectionPlanPreset.ring8.plan)
+        session = try store.updateSession(session.sessionId) { s in
+            s.object = ObjectSize(heightM: 0.15, radiusM: 0.08)
+            s.referenceFrames.append(ReferenceFrame(id: s.nextReferenceFrameId, createdAt: Date(), basePointWorld: SIMD3(0, -0.5, -0.5)))
+        }
+    } catch {
+        fail("セッションを作れません: \(error)")
+    }
+    let refId = session.referenceFrames[0].id
+
+    let width = 320, height = 240
+    let fx = 280.0
+    let intrinsics = simd_double3x3(rows: [SIMD3(fx, 0, Double(width) / 2), SIMD3(0, fx, Double(height) / 2), SIMD3(0, 0, 1)])
+    for i in 0..<3 {
+        let angle = Double(i) * .pi / 4
+        let base = SIMD3<Double>(0, -0.5, -0.5)
+        let position = base + SIMD3(0.4 * sin(angle), 0.15, 0.4 * cos(angle))
+        // カメラが基準点を向く姿勢（−Z が前）。
+        let forward = simd_normalize(base + SIMD3(0, 0.075, 0) - position)
+        let right = simd_normalize(simd_cross(forward, SIMD3(0, 1, 0)))
+        let up = simd_cross(right, forward)
+        let cameraToWorld = simd_double4x4(columns: (SIMD4(right, 0), SIMD4(up, 0), SIMD4(-forward, 0), SIMD4(position, 1)))
+        let jpeg = encodeImage(width: width, height: height, gray: false, type: .jpeg) { c in
+            c.setFillColor(CGColor(red: 0.9, green: 0.85, blue: 0.7, alpha: 1))
+            c.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            c.setFillColor(CGColor(red: 0.2 + 0.3 * Double(i), green: 0.3, blue: 0.6, alpha: 1))
+            c.fill(CGRect(x: 110, y: 60, width: 100, height: 120))
+        }
+        let frame = CapturedFrameInfo(
+            cameraToWorld: cameraToWorld, intrinsics: intrinsics, intrinsicsResolution: PixelSize(width: width, height: height),
+            imageSize: PixelSize(width: width, height: height), timestamp: 100 + Double(i), exposureDuration: 0.01,
+            exposureOffset: 0, trackingState: .normal, trackingReason: nil
+        )
+        let context = CaptureContext(
+            trigger: i == 0 ? .manual : .auto, referenceFrameId: refId, liveQuality: .unknown,
+            deviceOrientation: "landscapeLeft", displayRotationDegClockwise: 0, capturedAt: Date()
+        )
+        let photoId = SessionStore.newId()
+        do {
+            try store.addPhoto(sessionId: session.sessionId, photoId: photoId, jpegData: jpeg) { s, sequence in
+                PhotoRecorder.makePhoto(in: &s, photoId: photoId, sequence: sequence, frame: frame, context: context)
+            }
+            if i < 2 {
+                let png = encodeImage(width: width, height: height, gray: true, type: .png) { c in
+                    c.setFillColor(gray: 0, alpha: 1)
+                    c.fill(CGRect(x: 0, y: 0, width: width, height: height))
+                    c.setFillColor(gray: 1, alpha: 1)
+                    c.fill(CGRect(x: 110, y: 60, width: 100, height: 120))
+                }
+                try store.saveMask(sessionId: session.sessionId, photoId: photoId, pngData: png, mask: MaskInfo(
+                    status: i == 0 ? .confirmed : .candidate, width: width, height: height, method: MaskInfo.visionMethod,
+                    instanceCount: 1, selectedInstances: [1], selection: .auto
+                ))
+            } else {
+                try store.updateSession(session.sessionId) { s in
+                    if let index = s.photos.firstIndex(where: { $0.photoId == photoId }) { s.photos[index].mask = .failed("e2e: マスクなし") }
+                }
+            }
+        } catch {
+            fail("写真を保存できません: \(error)")
+        }
+    }
+    do { session = try store.loadSession(session.sessionId) } catch { fail("読み直せません: \(error)") }
+    return session
 }
 
 let client = TransferClient(receiverURL: receiverURL, token: token)

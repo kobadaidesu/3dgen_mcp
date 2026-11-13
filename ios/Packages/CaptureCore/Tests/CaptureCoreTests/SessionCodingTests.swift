@@ -43,8 +43,9 @@ final class SessionCodingTests: XCTestCase {
 
     func testTopLevelKeysAndValues() throws {
         let j = try json(exampleSession())
-        XCTAssertEqual(Set(j.keys), ["schema", "schemaVersion", "sessionId", "title", "createdAt", "updatedAt", "conventions", "device", "object", "referenceFrames", "directionPlan", "photos"])
+        XCTAssertEqual(Set(j.keys), ["schema", "schemaVersion", "sessionId", "title", "workKind", "createdAt", "updatedAt", "conventions", "device", "object", "referenceFrames", "directionPlan", "photos"])
         XCTAssertEqual(j["schema"] as? String, "memoria.capture.session")
+        XCTAssertEqual(j["workKind"] as? String, "object")  // 後から足した項目。いつも書く
         XCTAssertEqual(j["schemaVersion"] as? Int, 1)
         XCTAssertEqual(j["createdAt"] as? String, "2026-11-09T10:00:00+09:00")
         let device = try XCTUnwrap(j["device"] as? [String: Any])
@@ -91,7 +92,8 @@ final class SessionCodingTests: XCTestCase {
     func testPhotoKeysNullsAndMatrices() throws {
         let j = try json(exampleSession())
         let photo = try XCTUnwrap((j["photos"] as? [[String: Any]])?.first)
-        XCTAssertEqual(Set(photo.keys), ["photoId", "sequence", "capturedAt", "trigger", "referenceFrameId", "image", "camera", "direction", "quality", "mask"])
+        XCTAssertEqual(Set(photo.keys), ["photoId", "sequence", "capturedAt", "trigger", "referenceFrameId", "image", "camera", "direction", "quality", "mask", "flat"])
+        XCTAssertTrue(photo["flat"] is NSNull)  // 立体の作品の写真
         let image = try XCTUnwrap(photo["image"] as? [String: Any])
         XCTAssertEqual(Set(image.keys), ["file", "format", "width", "height", "exifOrientation", "displayRotationDegClockwise", "deviceOrientation"])
         XCTAssertEqual(image["format"] as? String, "jpeg")
@@ -164,6 +166,9 @@ final class SessionCodingTests: XCTestCase {
         """
         let s = try SessionJSON.makeDecoder().decode(CaptureSession.self, from: Data(text.utf8))
         XCTAssertNil(s.object)
+        // workKind の無い前の版のセッションは立体、flat の無い写真は null。
+        XCTAssertEqual(s.workKind, .object)
+        XCTAssertFalse(s.isFlat)
         // anyAzimuth の無い前の版の方向は、方位で当てはめる方向。
         XCTAssertEqual(s.directionPlan.targets.map(\.anyAzimuth), [false])
         XCTAssertNil(s.referenceFrames[0].objectToWorld)

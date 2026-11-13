@@ -153,9 +153,15 @@ public struct DirectionPlan: Codable, Equatable, Sendable {
     /// 方向を「正面・右・後ろ・左・真上」の名前で案内する一覧（ai5）。
     public var usesStepNames: Bool { id == DirectionPlanPreset.ai5.rawValue }
 
-    /// 方向の名前（画面に出す）。ai5 は「正面」「右」…「真上」、ほかは「45°・高さ 20°」。方位を問わない方向は「真上（高さ 90°）」。
+    /// 平面の作品（絵・貼り絵など）を真上から 1 枚撮る一覧（flat1）。基準（底の中心・円柱）を使わず、マスクも作らない。
+    public var isFlat: Bool { id == DirectionPlanPreset.flat1.rawValue }
+
+    /// 撮る前に基準（底の中心・円柱）を決める一覧か。flat1 だけは基準を作らない（方向は端末の傾きだけで決める）。
+    public var needsReference: Bool { !isFlat }
+
+    /// 方向の名前（画面に出す）。ai5・flat1 は「正面」「右」…「真上」、ほかは「45°・高さ 20°」。方位を問わない方向は「真上（高さ 90°）」。
     public func displayName(of target: DirectionTarget) -> String {
-        if usesStepNames, let name = target.stepName { return name }
+        if usesStepNames || isFlat, let name = target.stepName { return name }
         let el = DirectionTarget.formatDegrees(target.elevationDeg)
         if target.anyAzimuth { return "\(target.stepName ?? "上")（高さ \(el)°）" }
         return "\(DirectionTarget.formatDegrees(target.azimuthDeg))°・高さ \(el)°"
@@ -195,11 +201,25 @@ public enum DirectionPlanPreset: String, CaseIterable, Codable, Sendable, Identi
     case ring4
     /// ring8 に、仰角 50° で 90° ごとの 4 方向を足した 12 方向。
     case ring8plusHigh
+    /// 平面の作品（`workKind` が `flat`）：真上から 1 枚（`top-e90`。方位を問わない、iPhone の傾きが 70° 以上）。
+    /// 立体の作品の一覧ではないので、設定画面の「撮る方向」には出さない（`objectPresets`）。
+    case flat1
 
     public var id: String { rawValue }
 
     /// 新しく作るセッションの既定（今あるセッションは session.json の `directionPlan` のまま）。
     public static let `default`: DirectionPlanPreset = .ai5
+
+    /// 立体の作品の撮り方（設定画面で選べる一覧）。flat1 は「平面」を選んだセッションだけが使う。
+    public static var objectPresets: [DirectionPlanPreset] { allCases.filter { $0 != .flat1 } }
+
+    /// 作品の種類で決まる一覧：平面は flat1、立体は `objectPreset`（設定で選んだもの。flat1 が渡されたら既定）。
+    public static func plan(for kind: WorkKind, objectPreset: DirectionPlanPreset) -> DirectionPlan {
+        switch kind {
+        case .flat: return DirectionPlanPreset.flat1.plan
+        case .object: return (objectPreset == .flat1 ? DirectionPlanPreset.default : objectPreset).plan
+        }
+    }
 
     /// 方位の許容（±度）。ring8・ring4・ring8plusHigh。
     public static let azimuthTolerance: Double = 20
@@ -224,6 +244,10 @@ public enum DirectionPlanPreset: String, CaseIterable, Codable, Sendable, Identi
     /// ai5 の真上：仰角 90°、許容 ±15°（75° 以上で当てはまる）。方位は問わない。
     public static let ai5TopElevation: Double = 90
     public static let ai5TopElevationTolerance: Double = 15
+    /// flat1 の真上：仰角 90°、許容 ±20°（iPhone の傾きが 70° 以上で当てはまる）。平面の作品では仰角は
+    /// 作品の中心からではなく、カメラの向き（光軸が水平から下へ傾いた角度）で測る（`FlatGeometry.lookDownDeg`）。
+    public static let flatTopElevation: Double = 90
+    public static let flatTopElevationTolerance: Double = 20
 
     public var displayName: String {
         switch self {
@@ -232,6 +256,7 @@ public enum DirectionPlanPreset: String, CaseIterable, Codable, Sendable, Identi
         case .ring8: return "8 方向"
         case .ring4: return "4 方向（かんたん）"
         case .ring8plusHigh: return "8 方向 + 上から 4 方向"
+        case .flat1: return "平面（真上から 1 枚）"
         }
     }
 
@@ -243,6 +268,7 @@ public enum DirectionPlanPreset: String, CaseIterable, Codable, Sendable, Identi
         case .ring8: return "まわりを 1 周。8 枚・約 1 分"
         case .ring4: return "前後左右だけ。4 枚"
         case .ring8plusHigh: return "1 周と、上から 4 枚。12 枚"
+        case .flat1: return "絵・貼り絵などを真上から 1 枚"
         }
     }
 
@@ -271,6 +297,8 @@ public enum DirectionPlanPreset: String, CaseIterable, Codable, Sendable, Identi
         case .ai5:
             return ring(step: 90, elevation: Self.ai5SideElevation, azTol: Self.ai5SideAzimuthTolerance, elTol: Self.ai5SideElevationTolerance)
                 + [DirectionTarget.top(elevationDeg: Self.ai5TopElevation, elevationTolerance: Self.ai5TopElevationTolerance)]
+        case .flat1:
+            return [DirectionTarget.top(elevationDeg: Self.flatTopElevation, elevationTolerance: Self.flatTopElevationTolerance)]
         }
     }
 }

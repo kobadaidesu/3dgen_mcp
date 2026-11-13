@@ -22,6 +22,9 @@ public enum MaskRetakePolicy: String, Equatable, Sendable {
     /// （`empty`・`tooSmall`）か、マスクの大半が作品の外（`insideSilhouetteRatio` が `lenientMinInsideSilhouetteRatio` 未満）。
     /// 端に届いている（`touchesCropEdge`）・中心からずれている（`offCenter`）・広すぎる（`tooLarge`）だけ、確かめられない（`unknown`）は撮り直さない。
     case lenient
+    /// マスクを使わない一覧（flat1：平面の作品）：マスクは作らず、撮り直しにも使わない（いつも「使える」扱い）。
+    /// 平面の作品は、マスクの代わりに用紙の四隅（`photo.flat.corners`）で作品の範囲を記録する。
+    case notUsed
 
     /// lenient で「大半が作品の外」とみなす、輪郭の中にある割合の下限。
     public static let lenientMinInsideSilhouetteRatio = 0.5
@@ -30,6 +33,7 @@ public enum MaskRetakePolicy: String, Equatable, Sendable {
 
     /// 確かめた結果（`candidate` の `check`）が撮り直しに当たるか。
     func needsRetake(_ check: MaskCheck) -> Bool {
+        if self == .notUsed { return false }
         switch check.status {
         case .ok: return false
         case .unknown: return self == .strict
@@ -43,9 +47,10 @@ public enum MaskRetakePolicy: String, Equatable, Sendable {
 }
 
 extension DirectionPlan {
-    /// この一覧の撮り直しの決まり（ai5 は lenient、ほかは strict）。変えるときはここだけ。
+    /// この一覧の撮り直しの決まり（ai5 は lenient、flat1 は notUsed、ほかは strict）。変えるときはここだけ。
     public var retakePolicy: MaskRetakePolicy {
-        id == DirectionPlanPreset.ai5.rawValue ? .lenient : .strict
+        if isFlat { return .notUsed }
+        return id == DirectionPlanPreset.ai5.rawValue ? .lenient : .strict
     }
 }
 
@@ -54,6 +59,7 @@ extension Photo {
     public var maskOutcome: MaskOutcome { maskOutcome(policy: .strict) }
 
     public func maskOutcome(policy: MaskRetakePolicy) -> MaskOutcome {
+        if policy == .notUsed { return .good }
         switch mask.status {
         case .confirmed: return .good
         case .candidate:
@@ -169,11 +175,18 @@ extension Coverage {
     ///   一覧の `retakePolicy` が lenient（ai5）なら、はっきり失敗したときだけ（`MaskRetakePolicy.lenient`）。
     /// 代表の写真は、使える写真のうち一番新しいもの。使える写真が無ければ一番新しい写真。
     /// 代表より新しくて確認中の写真は、置き換え済みにしない（結果しだいで代表になる）。
+    /// 基準を使わない一覧（flat1）は `referenceFrameId` を見ず、方向が確定した写真をすべて数える（マスクは見ない）。
     public static func progress(photos: [Photo], referenceFrameId: String?, plan: DirectionPlan) -> CoverageProgress {
-        guard let referenceFrameId else { return .empty(plan: plan) }
         let policy = plan.retakePolicy
-        let inFrame = photos
-            .filter { $0.referenceFrameId == referenceFrameId && $0.direction.confirmed && $0.direction.targetId != nil }
+        let counted: [Photo]
+        if plan.needsReference {
+            guard let referenceFrameId else { return .empty(plan: plan) }
+            counted = photos.filter { $0.referenceFrameId == referenceFrameId }
+        } else {
+            counted = photos
+        }
+        let inFrame = counted
+            .filter { $0.direction.confirmed && $0.direction.targetId != nil }
             .sorted { $0.sequence < $1.sequence }
         let targets = plan.targets.map { target -> TargetProgress in
             let shots = inFrame.filter { $0.direction.targetId == target.id }
@@ -192,7 +205,7 @@ extension Coverage {
             }
             return TargetProgress(target: target, state: state, photoId: winner.photoId, supersededPhotoIds: superseded.map(\.photoId))
         }
-        return CoverageProgress(referenceFrameId: referenceFrameId, targets: targets)
+        return CoverageProgress(referenceFrameId: plan.needsReference ? referenceFrameId : nil, targets: targets)
     }
 
     public static func progress(in session: CaptureSession, referenceFrameId: String?) -> CoverageProgress {
@@ -212,6 +225,12 @@ public enum PhotoIssue: String, CaseIterable, Sendable {
     case directionUnconfirmed
     /// 同じ方向をあとで撮り直した（置き換え済み）。
     case superseded
+    /// 平面の作品：用紙（四角）が見つからず、写真の全体をそのまま保存した（`flat.corners` が null）。
+    case sheetNotFound
+    /// 平面の作品：用紙の角が写真の端に近い（用紙が切れているかもしれない）。
+    case sheetAtFrameEdge
+    /// 平面の作品：真上から撮れていない（iPhone の傾きが真上の許容の外。`targetId` が null）。
+    case notOverhead
 
     public var label: String {
         switch self {
@@ -220,6 +239,9 @@ public enum PhotoIssue: String, CaseIterable, Sendable {
         case .maskMissing: return "切り抜きなし"
         case .directionUnconfirmed: return "方向が参考値"
         case .superseded: return "置き換え済み"
+        case .sheetNotFound: return "用紙が見つからない"
+        case .sheetAtFrameEdge: return "用紙が端で切れているかも"
+        case .notOverhead: return "真上から撮れていない"
         }
     }
 }
@@ -231,8 +253,10 @@ public struct Readiness: Equatable, Sendable {
     public var progress: CoverageProgress
     /// 写真ごとの気になる点（無い写真は入らない）。
     public var issues: [String: [PhotoIssue]]
-    /// 切り抜きを作っている・待っている写真の数。
+    /// 切り抜きを作っている・待っている写真の数（平面の作品はマスクを作らないので 0）。
     public var pendingMaskCount: Int
+    /// 平面の作品のセッション（`workKind` が `flat`）。方向の代わりに「写真」と数え、基準は使わない。
+    public var isFlat: Bool = false
 
     public var doneCount: Int { progress.doneCount }
     public var totalCount: Int { progress.totalCount }
@@ -253,6 +277,7 @@ public struct Readiness: Equatable, Sendable {
     /// セッションから作る。方向は最後に設定した基準で数える（撮影画面を閉じると基準は無効になるため、有効かどうかは問わない）。
     /// 置き換え済みは基準ごとに決める。`pendingPhotoIds` は順番待ちのマスク（まだ `processing` になっていない）。
     public static func make(session: CaptureSession, pendingPhotoIds: Set<String> = []) -> Readiness {
+        if session.isFlat { return makeFlat(session: session) }
         let lastId = session.referenceFrames.last?.id
         let progress = Coverage.progress(in: session, referenceFrameId: lastId)
         var superseded = Set<String>()
@@ -283,9 +308,28 @@ public struct Readiness: Equatable, Sendable {
         return Readiness(referenceFrameId: lastId, progress: progress, issues: issues, pendingMaskCount: pending)
     }
 
+    /// 平面の作品：真上の写真が 1 枚あればそろった。マスクは見ない。用紙が見つからない・端にかかっている・
+    /// 真上から撮れていない写真は「気になる写真」に出す（送るのは止めない）。
+    static func makeFlat(session: CaptureSession) -> Readiness {
+        let progress = Coverage.progress(in: session, referenceFrameId: nil)
+        let superseded = progress.supersededPhotoIds
+        var issues: [String: [PhotoIssue]] = [:]
+        for photo in session.photos {
+            var list: [PhotoIssue] = []
+            if photo.flat?.corners == nil { list.append(.sheetNotFound) }
+            if photo.flat?.sheetAtFrameEdge == true { list.append(.sheetAtFrameEdge) }
+            if photo.direction.targetId == nil { list.append(.notOverhead) }
+            if !photo.direction.confirmed { list.append(.directionUnconfirmed) }
+            if superseded.contains(photo.photoId) { list.append(.superseded) }
+            if !list.isEmpty { issues[photo.photoId] = list }
+        }
+        return Readiness(referenceFrameId: nil, progress: progress, issues: issues, pendingMaskCount: 0, isFlat: true)
+    }
+
     /// 1 行の要約（例：「方向 8/8 そろいました」「方向 6/8・撮り直し 2」）。
     public var directionSummary: String {
         if totalCount == 0 { return "撮る方向がありません" }
+        if isFlat { return isComplete ? "真上の写真 \(doneCount)/\(totalCount) そろいました" : "真上の写真 \(doneCount)/\(totalCount)" }
         if isComplete { return "方向 \(doneCount)/\(totalCount) そろいました" }
         var parts = ["方向 \(doneCount)/\(totalCount)"]
         let checking = progress.checkingIds.count, retake = progress.retakeIds.count

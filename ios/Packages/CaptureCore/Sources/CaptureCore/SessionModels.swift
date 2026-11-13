@@ -57,6 +57,9 @@ public struct CaptureSession: Codable, Equatable, Sendable {
     public var schemaVersion: Int
     public var sessionId: String
     public var title: String
+    /// 作品の種類（新しいセッションを作るときにユーザーが選ぶ）。`object`（立体：工作・粘土など）| `flat`（平面：絵・貼り絵など）。
+    /// 後から足した項目で、キーが無い（それより前のセッション）・null は `object`。書くときはいつも書く。
+    @WorkKindCoding public var workKind: WorkKind
     public var createdAt: Date
     public var updatedAt: Date
     public var conventions: [String: String]
@@ -73,12 +76,14 @@ public struct CaptureSession: Codable, Equatable, Sendable {
         title: String,
         createdAt: Date,
         device: DeviceInfo,
-        directionPlan: DirectionPlan
+        directionPlan: DirectionPlan,
+        workKind: WorkKind = .object
     ) {
         schema = SessionSchema.name
         schemaVersion = SessionSchema.version
         self.sessionId = sessionId
         self.title = title
+        self.workKind = workKind
         self.createdAt = createdAt
         updatedAt = createdAt
         conventions = Conventions.text
@@ -88,6 +93,9 @@ public struct CaptureSession: Codable, Equatable, Sendable {
         self.directionPlan = directionPlan
         photos = []
     }
+
+    /// 平面の作品のセッション（真上から 1 枚。基準・マスクを使わない）。
+    public var isFlat: Bool { workKind == .flat }
 
     /// 今使える基準（最後に作られ、まだ無効になっていないもの）。
     public var activeReferenceFrame: ReferenceFrame? {
@@ -185,12 +193,15 @@ public struct Photo: Codable, Equatable, Sendable, Identifiable {
     public var direction: DirectionInfo
     public var quality: PhotoQuality
     public var mask: MaskInfo
+    /// 平面の作品の写真で測ったもの（用紙の四隅・実寸・補正した画像）。立体の作品の写真と、この項目より前の写真は null。
+    @NullCodable public var flat: FlatPhotoInfo?
 
     public var id: String { photoId }
 
     public init(
         photoId: String, sequence: Int, capturedAt: Date, trigger: CaptureTrigger, referenceFrameId: String?,
-        image: ImageInfo, camera: CameraInfo, direction: DirectionInfo, quality: PhotoQuality, mask: MaskInfo
+        image: ImageInfo, camera: CameraInfo, direction: DirectionInfo, quality: PhotoQuality, mask: MaskInfo,
+        flat: FlatPhotoInfo? = nil
     ) {
         self.photoId = photoId
         self.sequence = sequence
@@ -202,10 +213,13 @@ public struct Photo: Codable, Equatable, Sendable, Identifiable {
         self.direction = direction
         self.quality = quality
         self.mask = mask
+        self.flat = flat
     }
 
     public static func imagePath(photoId: String) -> String { "photos/\(photoId).jpg" }
     public static func maskPath(photoId: String) -> String { "masks/\(photoId).png" }
+    /// 平面の作品の、遠近を直してまっすぐにした画像。
+    public static func rectifiedPath(photoId: String) -> String { "rectified/\(photoId).jpg" }
 }
 
 public struct ImageInfo: Codable, Equatable, Sendable {
