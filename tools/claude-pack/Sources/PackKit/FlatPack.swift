@@ -3,7 +3,8 @@ import CoreGraphics
 import CaptureCore
 
 /// Flat artwork (`workKind` "flat", plan `flat1`): one photo from straight above. The pack holds the picture itself
-/// (rectified when the app found the sheet), the measured sheet size or a plain "unknown", and says that no 3D
+/// (rectified when the app found the sheet), the sheet size (the paper the person picked from the app's list, else the
+/// ARKit measurement) or a plain "unknown", and says that no 3D
 /// reconstruction is needed. No overview grid, no hull, no masks.
 extension PackBuilder {
     static let artworkViewName = "artwork"
@@ -69,16 +70,28 @@ extension PackBuilder {
         m.workKind = WorkKind.flat.rawValue
         m.method = "flatSheetCorners"
         m.frame = [
-            "units": "metres (sheet.widthCm/heightCm in centimetres)",
-            "sheet": "width = the horizontal side of views/artwork.jpg, height = its vertical side",
+            "units": "metres (sheet.*Cm in centimetres)",
+            "sheet": "width = the horizontal side of views/artwork.jpg, height = its vertical side (null when the paper was declared but its orientation is unknown; longSide/shortSide are always given). source: declared (picked from the app's list, preferred) | measured (ARKit plane)",
             "thickness": "not measured (flat artwork)",
         ]
-        if let photo, let size = photo.flat?.size {
+        m.sheet = Self.resolveSheet(session: session, photo: photo, artworkIsRectified: artworkSource == "rectified")
+        if let sheet = m.sheet, sheet.source == "declared" {
             m.status = "ok"
-            m.sheet = .init(widthM: round6(size.widthM), heightM: round6(size.heightM), widthCm: round1(size.widthM * 100),
-                            heightCm: round1(size.heightM * 100), planeSource: size.planeSource, photoId: photo.photoId)
+            m.method = "declaredSheet"
             m.caveats = [
-                "The sheet's four corners (found by Vision in the photo) were projected onto an ARKit plane (\(size.planeSource)) and the opposite edges averaged. Expect an error of a few millimetres to about a centimetre.",
+                "The sheet size is the paper the person picked from the app's list (\(sheet.declaredSheetId ?? "?"), \(f1mm(sheet.shortSideM)) × \(f1mm(sheet.longSideM)) mm); it was not measured. Prefer it over any measurement.",
+                sheet.orientation == nil
+                    ? "The orientation is unknown (no sheet corners were found): decide from the picture whether the long side is horizontal or vertical."
+                    : "The orientation (\(sheet.orientation ?? "")) comes from the sheet's corners in the photo: the longer side of the picture is the long side of the paper.",
+                "Only the paper size is known; parts glued on that stick out of the paper are not included, and the thickness is not known.",
+            ]
+            if let measured = sheet.measured {
+                m.caveats.append("For reference, the ARKit measurement was \(Brief.f1(measured.widthCm)) × \(Brief.f1(measured.heightCm)) cm (\(measured.planeSource)); the declared paper takes precedence.")
+            }
+        } else if let sheet = m.sheet, let measured = sheet.measured {
+            m.status = "ok"
+            m.caveats = [
+                "The sheet's four corners (found by Vision in the photo) were projected onto an ARKit plane (\(measured.planeSource)) and the opposite edges averaged. Expect an error of a few millimetres to about a centimetre.",
                 "Only the sheet (the rectangle) is measured; parts glued on that stick out of the paper are not included, and the thickness is not measured.",
             ]
         } else {
@@ -123,8 +136,41 @@ extension PackBuilder {
                               coverage: coverage, maskIssues: [], files: files, timingsS: timings, flat: flatSource)
         try encoder.encode(index).write(to: dir.appendingPathComponent("pack.json"))
 
-        let size = m.sheet.map { String(format: "sheet %.1f × %.1f cm", $0.widthCm, $0.heightCm) } ?? "sheet size unknown"
+        let size = m.sheet.map { sheet -> String in
+            if let w = sheet.widthCm, let h = sheet.heightCm { return String(format: "sheet %.1f × %.1f cm (%@)", w, h, sheet.source) }
+            return String(format: "sheet %.1f × %.1f cm (%@, orientation unknown)", sheet.longSideCm, sheet.shortSideCm, sheet.source)
+        } ?? "sheet size unknown"
         return String(format: "[pack] %@: flat artwork, %@ (%@), %.1fs", session.sessionId, size, artworkSource, timings["total"] ?? 0)
+    }
+
+    /// The sheet size the pack reports. Priority: the paper the person picked (`declaredSize.sheet`), then the ARKit
+    /// measurement of the chosen photo (`flat.size`), else nil. A declared paper is oriented by the picture: the rectified
+    /// image when `views/artwork.jpg` is that image, otherwise the sheet's corners (wider than tall → width = long side);
+    /// without either the orientation stays unknown (width/height null).
+    public static func resolveSheet(session: CaptureSession, photo: Photo?, artworkIsRectified: Bool) -> Measurements.Sheet? {
+        let measured = photo?.flat?.size
+        if let declared = session.declaredSheet {
+            var oriented: (widthM: Double, heightM: Double)?
+            if artworkIsRectified, let r = photo?.flat?.rectified {
+                oriented = declared.oriented(horizontal: Double(r.width), vertical: Double(r.height))
+            }
+            if oriented == nil, let corners = photo?.flat?.corners {
+                oriented = declared.oriented(corners: corners)
+            }
+            let orientation = oriented.map { $0.widthM >= $0.heightM ? "landscape" : "portrait" }
+            return Measurements.Sheet(
+                source: "declared", widthM: oriented?.widthM, heightM: oriented?.heightM,
+                longSideM: declared.longSideM, shortSideM: declared.shortSideM, orientation: orientation,
+                declaredSheetId: declared.id, declaredSheetName: declared.displayName, planeSource: nil,
+                measured: measured.map { Measurements.MeasuredSheet($0) }, photoId: photo?.photoId)
+        }
+        guard let photo, let size = measured else { return nil }
+        return Measurements.Sheet(
+            source: "measured", widthM: size.widthM, heightM: size.heightM,
+            longSideM: max(size.widthM, size.heightM), shortSideM: min(size.widthM, size.heightM),
+            orientation: size.widthM >= size.heightM ? "landscape" : "portrait",
+            declaredSheetId: nil, declaredSheetName: nil, planeSource: size.planeSource,
+            measured: Measurements.MeasuredSheet(size), photoId: photo.photoId)
     }
 
     /// A view entry for the flat photo (angles: elevation is the camera's look-down angle; no azimuth).
@@ -158,6 +204,9 @@ extension PackBuilder {
     }
 }
 
+/// Millimetres with no decimals (for caveats).
+func f1mm(_ metres: Double) -> String { String(format: "%.0f", metres * 1000) }
+
 extension Brief {
     /// `brief.md` for flat artwork (Japanese). Only what the app measured; a missing size is said to be unknown.
     public static func flatMarkdown(session: CaptureSession, provenance: PackIndex.Provenance, choices: [ViewChoice],
@@ -176,15 +225,34 @@ extension Brief {
 
         out.append("## 大きさ")
         out.append("")
-        if let s = m.sheet {
+        if let s = m.sheet, s.source == "declared" {
+            let name = s.declaredSheetName ?? s.declaredSheetId ?? "?"
+            if let w = s.widthCm, let h = s.heightCm {
+                out.append("| 幅（絵の横） | 高さ（絵の縦） | 求め方 |")
+                out.append("|---|---|---|")
+                out.append("| \(f1(w)) cm | \(f1(h)) cm | 撮る人が一覧から選んだ紙の大きさ（\(name)） |")
+                out.append("")
+                out.append("- **紙の大きさは、撮る人が一覧から選んだ値（\(name)、\(f1(s.shortSideCm)) × \(f1(s.longSideCm)) cm）です。** AR で測った値ではありません。この値を使ってください。")
+                out.append("- 縦・横の向きは、写真の中の紙の形から決めました（絵の長い方の辺が紙の長い辺）。")
+            } else {
+                out.append("- **紙の大きさは、撮る人が一覧から選んだ値（\(name)、\(f1(s.shortSideCm)) × \(f1(s.longSideCm)) cm）です。** AR で測った値ではありません。この値を使ってください。")
+                out.append("- 縦・横の向きは分かりません（写真の中に紙の四角が見つかりませんでした）。絵を見て、長い辺 \(f1(s.longSideCm)) cm が横か縦かを決めてください。")
+            }
+            if let measured = s.measured {
+                out.append("- 参考：紙の四隅を ARKit の平面（\(planeJa(measured.planeSource))）に当てて測った値は 幅 \(f1(measured.widthCm)) × 高さ \(f1(measured.heightCm)) cm でした。選んだ値を優先してください。")
+            }
+            out.append("- 紙からはみ出して貼った物と、厚みは分かりません。")
+            out.append("- 板や額にするときは、この大きさに合わせてください（`measurements.json` の `sheet`。`source` は `declared`）。")
+        } else if let s = m.sheet, let w = s.widthCm, let h = s.heightCm {
             out.append("| 幅（絵の横） | 高さ（絵の縦） | 求め方 |")
             out.append("|---|---|---|")
-            out.append("| \(f1(s.widthCm)) cm | \(f1(s.heightCm)) cm | 紙の四隅を ARKit の平面（\(planeJa(s.planeSource))）に当てて測った値 |")
+            out.append("| \(f1(w)) cm | \(f1(h)) cm | 紙の四隅を ARKit の平面（\(planeJa(s.planeSource ?? ""))）に当てて測った値 |")
             out.append("")
             out.append("- 測ったのは紙（四角）の大きさです。紙からはみ出して貼った物と、厚みは測っていません。誤差は数 mm〜1 cm ほどです。")
-            out.append("- 板や額にするときは、この幅・高さに合わせてください（`measurements.json` の `sheet`）。")
+            out.append("- 撮る人は紙の大きさを一覧から選んでいません（「わからない」）。")
+            out.append("- 板や額にするときは、この幅・高さに合わせてください（`measurements.json` の `sheet`。`source` は `measured`）。")
         } else {
-            out.append("**大きさは分かりません**（\(unavailableJa(m))）。推測で決めないでください。大きさが要るときは、推測したことをはっきり書いてください。")
+            out.append("**大きさは分かりません**（撮る人は紙の大きさを選んでいません。\(unavailableJa(m))）。推測で決めないでください。大きさが要るときは、推測したことをはっきり書いてください。")
         }
         out.append("")
 
@@ -240,7 +308,7 @@ extension Brief {
         out.append("- manifestHash（`_receipt.json`）：`\(provenance.manifestHash ?? "なし")`")
         out.append("- 受信：\(provenance.receivedAt ?? "記録なし")")
         out.append("- 作成：\(provenance.generatedAt)（\(provenance.tool) \(provenance.toolVersion)）")
-        out.append("- 機械で読む一覧：`pack.json`（`workKind` は `flat`、使った写真・紙の四隅）、`measurements.json`（`sheet` に紙の実寸。測れないときは null）")
+        out.append("- 機械で読む一覧：`pack.json`（`workKind` は `flat`、使った写真・紙の四隅）、`measurements.json`（`sheet` に紙の大きさ。`source` は選んだ値 `declared` か測った値 `measured`。どちらも無いときは null）")
         out.append("")
         return out.joined(separator: "\n")
     }

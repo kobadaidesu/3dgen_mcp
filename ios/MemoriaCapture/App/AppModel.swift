@@ -108,7 +108,8 @@ final class AppModel: ObservableObject {
     }
 
     /// 新しいセッション。作品の種類で撮り方が決まる（平面は真上から 1 枚、立体は設定の撮る方向）。
-    func createSession(title: String, workKind: WorkKind) -> CaptureSession? {
+    /// `declaredSize` は撮る人が選んだ・入力した大きさ（平面は紙、立体は高さ。無ければ null）。
+    func createSession(title: String, workKind: WorkKind, declaredSize: DeclaredSize? = nil) -> CaptureSession? {
         do {
             let plan = DirectionPlanPreset.plan(for: workKind, objectPreset: settings.planPreset)
             let session = try store.createSession(
@@ -116,7 +117,8 @@ final class AppModel: ObservableObject {
                 device: DeviceInfoProvider.current(),
                 plan: plan,
                 workKind: workKind,
-                guidance: CaptureGuidance.resolve(preferred: settings.guidance, plan: plan, workKind: workKind)
+                guidance: CaptureGuidance.resolve(preferred: settings.guidance, plan: plan, workKind: workKind),
+                declaredSize: declaredSize
             )
             sessionChanged()
             return session

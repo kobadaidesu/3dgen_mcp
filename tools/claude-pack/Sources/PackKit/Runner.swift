@@ -191,6 +191,8 @@ public final class PackBuilder {
 
         var measurements = timed("visualHull") { measure(referenceFrameId: selection.referenceFrameId, dir: dir) }
         measurements.seconds = timings["visualHull"] ?? 0
+        // The height the person typed in (preferred over the derived / measured height; the numbers above are not rescaled).
+        measurements.declaredHeight = session.declaredHeightM.map { Measurements.DeclaredHeight(heightM: $0) }
         try timed("overview") {
             let sheet = try Overview.render(tiles: tiles, footer: footerLines(measurements))
             try ImageOps.writeJPEG(sheet, to: dir.appendingPathComponent("overview.jpg"), quality: 0.88)

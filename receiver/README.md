@@ -43,6 +43,7 @@ iPhone のアプリも、送り先が公開 IP アドレス（名前なら、引
 - フォルダの読み方は、受信サーバーが書く `captures/README.md` にあります。形は [docs/data-format.md](../docs/data-format.md)。
 - 平面の作品（session.json の `workKind` が `flat`）のセッションには、マスクの代わりに `rectified/<photoId>.jpg`（遠近を直した画像。作れたときだけ）が入ります。受信サーバーは `rectified/<UUID>.jpg` の path を受け付け、`photos[].flat` の形と `rectified.file` が manifest にあるかを確かめます。
 - 向きで案内した立体のセッション（session.json の `guidance` が `heading`）は、基準の `basePointWorld` が null のことがあります（机の面が分からないとき）。受信サーバーは `guidance` の値と、`referenceFrames[].heading`（撮ったあとに求めた中心・大きさ）の形を確かめます。`index.json` の各セッションに `guidance`（立体は `heading` か `baseCylinder`。無いセッションは `baseCylinder`、平面は null）が入ります。
+- 撮る人が選んだ・入力した大きさ（session.json の `declaredSize`。平面は一覧から選んだ紙 `sheet`、立体は入力した高さ `heightM`）があれば、受信サーバーは形と値の範囲（紙の辺 0.01〜3 m で長い辺 ≥ 短い辺、高さ 0.005〜3 m）を確かめます。無い・null のセッションもそのまま受け付けます。`show` は「選んだ大きさ」の行に出します。
 - 一覧と中身の確認（`list` に種類「立体・平面」の列（向きで案内した立体は「立体・向き」）、`show` に種類と案内のしかた、向きで案内した基準なら求めた中心（線の外れ）・机の面・おおよその大きさと写真ごとの向き、平面の作品なら写真ごとの用紙・実寸・補正した画像の有無が出ます）:
 
 ```sh

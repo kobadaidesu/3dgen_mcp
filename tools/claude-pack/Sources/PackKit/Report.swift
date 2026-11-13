@@ -3,7 +3,7 @@ import CaptureCore
 
 public enum PackInfo {
     public static let toolName = "memoria-pack"
-    public static let toolVersion = "0.4.0"
+    public static let toolVersion = "0.5.0"
 }
 
 public struct Size3: Codable, Equatable, Sendable {
@@ -55,17 +55,85 @@ public struct Measurements: Codable, Sendable {
         public var voxelSizeM: Double
     }
 
-    /// The flat artwork's sheet (`workKind` "flat"): the paper measured by projecting its four corners onto an ARKit plane.
+    /// The flat artwork's sheet (`workKind` "flat"): the size to use, from the paper the person picked from the app's list
+    /// (`declaredSize.sheet`, preferred) or, without one, the sheet measured by projecting its four corners onto an ARKit plane.
     public struct Sheet: Codable, Equatable, Sendable {
-        /// Horizontal side of `views/artwork.jpg` (the rectified picture), metres.
+        /// "declared" (the person picked this paper from the app's list; not measured) | "measured" (ARKit plane).
+        public var source: String
+        /// Horizontal side of `views/artwork.jpg` (the rectified picture), metres. null when the paper was declared but its
+        /// orientation is unknown (no sheet corners were found): then only `longSideM`/`shortSideM` are known.
+        @NullCodable public var widthM: Double?
+        /// Vertical side of `views/artwork.jpg`, metres (null as `widthM`).
+        @NullCodable public var heightM: Double?
+        @NullCodable public var widthCm: Double?
+        @NullCodable public var heightCm: Double?
+        public var longSideM: Double
+        public var shortSideM: Double
+        public var longSideCm: Double
+        public var shortSideCm: Double
+        /// "landscape" (width = long side) | "portrait" (width = short side) | null (unknown).
+        @NullCodable public var orientation: String?
+        /// The list id (e.g. "yatsugiri") and its Japanese name ("八つ切") when `source` is "declared"; null otherwise.
+        @NullCodable public var declaredSheetId: String?
+        @NullCodable public var declaredSheetName: String?
+        /// "existingPlaneGeometry" | "estimatedPlane" (the ARKit plane the corners were projected onto) when `source` is "measured"; null otherwise.
+        @NullCodable public var planeSource: String?
+        /// The ARKit measurement whenever there is one (also next to a declared paper, for reference). null when not measured.
+        @NullCodable public var measured: MeasuredSheet?
+        @NullCodable public var photoId: String?
+
+        public init(source: String, widthM: Double?, heightM: Double?, longSideM: Double, shortSideM: Double, orientation: String?,
+                    declaredSheetId: String?, declaredSheetName: String?, planeSource: String?, measured: MeasuredSheet?, photoId: String?) {
+            self.source = source
+            self.widthM = widthM.map(round6)
+            self.heightM = heightM.map(round6)
+            widthCm = widthM.map { round1($0 * 100) }
+            heightCm = heightM.map { round1($0 * 100) }
+            self.longSideM = round6(longSideM)
+            self.shortSideM = round6(shortSideM)
+            longSideCm = round1(longSideM * 100)
+            shortSideCm = round1(shortSideM * 100)
+            self.orientation = orientation
+            self.declaredSheetId = declaredSheetId
+            self.declaredSheetName = declaredSheetName
+            self.planeSource = planeSource
+            self.measured = measured
+            self.photoId = photoId
+        }
+    }
+
+    /// The sheet measured on the ARKit plane (`photos[].flat.size`).
+    public struct MeasuredSheet: Codable, Equatable, Sendable {
         public var widthM: Double
-        /// Vertical side of `views/artwork.jpg`, metres.
         public var heightM: Double
         public var widthCm: Double
         public var heightCm: Double
-        /// "existingPlaneGeometry" | "estimatedPlane" (the ARKit plane the corners were projected onto).
         public var planeSource: String
-        public var photoId: String
+
+        public init(_ size: FlatSheetSize) {
+            widthM = round6(size.widthM)
+            heightM = round6(size.heightM)
+            widthCm = round1(size.widthM * 100)
+            heightCm = round1(size.heightM * 100)
+            planeSource = size.planeSource
+        }
+    }
+
+    /// 3D work: the height the person typed in the app (`declaredSize.heightM`). Not measured; prefer it over the derived or
+    /// measured height. The other numbers in this file are left as derived (nothing is rescaled).
+    public struct DeclaredHeight: Codable, Equatable, Sendable {
+        public var heightM: Double
+        public var heightCm: Double
+        /// "userEntered".
+        public var source: String
+        public var note: String
+
+        public init(heightM: Double) {
+            self.heightM = round6(heightM)
+            heightCm = round1(heightM * 100)
+            source = "userEntered"
+            note = "Typed in by the person who took the photos (not measured). Prefer it over sizeM.height; choose width and depth so that their ratio to this height matches the photos. sizeM is left as derived (not rescaled)."
+        }
     }
 
     /// Heading-guided sessions (`guidance: "heading"`): how the object centre and the approximate size were derived after capture.
@@ -104,14 +172,18 @@ public struct Measurements: Codable, Sendable {
     public var sessionId: String
     /// "object" (3D work: hull / cylinder) | "flat" (flat artwork: `sheet`, no 3D size). Missing in packages before 0.3.0.
     public var workKind: String? = "object"
-    /// Flat artwork only: the sheet size, or null when it could not be measured. `sizeCm`/`sizeM` stay null for flat artwork.
+    /// Flat artwork only: the sheet size (the declared paper, else the measured one), or null when neither is known.
+    /// `sizeCm`/`sizeM` stay null for flat artwork.
     @NullCodable public var sheet: Sheet?
+    /// 3D work only: the height the person typed in (null when not entered). Preferred over the derived/measured height.
+    @NullCodable public var declaredHeight: DeclaredHeight?
     /// "ok" (visual hull) | "approximate" (too few silhouettes: `sizeCm` is the user-fitted cylinder, see `method`) | "unavailable"
     public var status: String
     @NullCodable public var unavailableReason: String?
     /// "visualHull" | "userCylinder" (the cylinder fitted with the AR guide during capture, not a measurement)
     /// | "headingDerived" (heading-guided capture: approximate size derived after capture from masks and poses; see `heading`)
     /// | "flatSheetCorners" (flat artwork: the sheet's corners projected onto an ARKit plane; see `sheet`)
+    /// | "declaredSheet" (flat artwork: the paper the person picked from the app's list; see `sheet`)
     public var method = "visualHull"
     public var frame: [String: String] = [
         "units": "metres (sizeCm in centimetres)",

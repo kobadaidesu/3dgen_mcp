@@ -7,6 +7,7 @@ import UIKit
 /// 平面の作品（絵・貼り絵など）の撮影：基準（底の中心・円柱）を作らず、真上から 1 枚撮る。
 /// 画面には用紙の輪郭（Vision の四角）を重ねる。写真は立体と同じ高解像度のフレーム（captureHighResolutionFrame）。
 /// 撮ったあとに、その写真で用紙を見つけ直し、ARKit の平面に四隅を当てて実寸を測り、遠近を直した画像を作る。
+/// 撮る人が紙の大きさを選んだとき（`declaredSize.sheet`）は、補正した画像の縦横比にその紙を使う（ARKit の平面で測った実寸は補助）。
 /// 判定と計算は CaptureCore（`FlatGuidance`・`FlatShotStabilizer`・`FlatGeometry`）。
 @MainActor
 final class FlatCaptureController: ObservableObject {
@@ -47,6 +48,8 @@ final class FlatCaptureController: ObservableObject {
 
     let arView: ARSCNView
     let sessionId: String
+    /// 撮る人が新しいセッションで選んだ紙。選んでいなければ nil。
+    let declaredSheet: DeclaredSheet?
     private let store: SessionStore
     private let masks: MaskProcessor
     private let onSessionChanged: @MainActor () -> Void
@@ -71,6 +74,7 @@ final class FlatCaptureController: ObservableObject {
         autoCaptureEnabled = settings.autoCaptureEnabled
         let session = try? store.loadSession(sessionId)
         plan = session?.directionPlan ?? DirectionPlanPreset.flat1.plan
+        declaredSheet = session?.declaredSheet
         photoCount = session?.photos.count ?? 0
         arView = ARSCNView(frame: .zero)
         arView.scene = SCNScene()
@@ -274,7 +278,7 @@ final class FlatCaptureController: ObservableObject {
     /// 3. 実寸を測り、遠近を直した画像と元の写真を保存する。
     nonisolated private func save(image: CapturedImage, info: CapturedFrameInfo, context: CaptureContext, quad: FlatQuad?, confidence: Double?,
                                   plane: (point: SIMD3<Double>, normal: SIMD3<Double>, source: String)?) {
-        let store = self.store, sessionId = self.sessionId
+        let store = self.store, sessionId = self.sessionId, declaredSheet = self.declaredSheet
         saveQueue.async { [weak self] in
             let result: Result<Photo, Error> = autoreleasepool {
                 guard let jpeg = JPEGEncoder.shared.jpeg(from: image.pixelBuffer) else { return .failure(CaptureError.encodeFailed) }
@@ -295,7 +299,7 @@ final class FlatCaptureController: ObservableObject {
                         let ray = FlatGeometry.ray(throughPixel: center, camera: camera, imageSize: info.imageSize)
                         distance = FlatGeometry.intersect(ray, planePoint: plane.point, planeNormal: plane.normal).map { simd_distance($0, ray.origin) }
                     }
-                    if let out = FlatGeometry.rectifiedSize(corners: quad, size: flat.size),
+                    if let out = FlatGeometry.rectifiedSize(corners: quad, size: flat.size, declaredSheet: declaredSheet),
                        let data = SheetRectifier.shared.rectifiedJPEG(pixelBuffer: image.pixelBuffer, corners: quad, width: out.width, height: out.height) {
                         rectified = data
                         flat.rectified = FlatRectifiedImage(file: "", width: out.width, height: out.height)

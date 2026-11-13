@@ -163,6 +163,27 @@ def guidance(session) -> "str | None":
     return g if g in GUIDANCES else "baseCylinder"
 
 
+def declared_size(session) -> "dict | None":
+    """The size the person picked or typed in on the iPhone (session.json "declaredSize", added later; not measured).
+
+    {"sheet": {"id", "longSideM", "shortSideM"} | None, "heightM": float | None} with only well-formed parts kept,
+    or None when nothing was entered. Flat artwork keeps only the sheet, 3D work only the height."""
+    declared = session.get("declaredSize") if isinstance(session, dict) else None
+    if not isinstance(declared, dict):
+        return None
+    flat = work_kind(session) == "flat"
+    sheet = declared.get("sheet")
+    if not (flat and isinstance(sheet, dict) and isinstance(sheet.get("id"), str)
+            and _num(sheet.get("longSideM")) and _num(sheet.get("shortSideM"))):
+        sheet = None
+    else:
+        sheet = {"id": sheet["id"], "longSideM": sheet["longSideM"], "shortSideM": sheet["shortSideM"]}
+    height = _num(declared.get("heightM")) if not flat else None
+    if sheet is None and height is None:
+        return None
+    return {"sheet": sheet, "heightM": height}
+
+
 def session_summary(root: Path, folder: Path) -> dict:
     sid = folder.name
     session = read_json(folder / "session.json")
@@ -176,6 +197,7 @@ def session_summary(root: Path, folder: Path) -> dict:
         "title": session.get("title") or "",
         "workKind": work_kind(session),
         "guidance": guidance(session),
+        "declaredSize": declared_size(session),
         "capturePlan": plan.get("id"),
         "photoCount": len(photos),
         "receivedAt": _received_at(folder),
@@ -354,6 +376,7 @@ def get_brief(root: Path, session: str) -> dict:
         "title": index.get("title") if isinstance(index.get("title"), str) else "",
         "workKind": kind,
         "guidance": index.get("guidance") if index.get("guidance") in GUIDANCES else guidance(session),
+        "declaredSize": declared_size(session),
         "packDir": str(pack.resolve()),
         "briefPath": str((pack / "brief.md").resolve()),
         "brief": (pack / "brief.md").read_text(encoding="utf-8", errors="replace"),
@@ -374,12 +397,22 @@ def get_brief(root: Path, session: str) -> dict:
                           "approximate size (measurements.sizeM, with lowerM/upperM bounds and confidence in "
                           "measurements.heading) were derived after capture. Read brief.md for how reliable they are. "
                           + result["next"])
+    height = (result["declaredSize"] or {}).get("heightM")
+    if kind != "flat" and height is not None:
+        result["next"] = ("The person typed in the height: %.1f cm (declaredSize.heightM, measurements.declaredHeight; not "
+                          "measured). Prefer it over the derived or measured height; choose width and depth so their ratio "
+                          "to this height matches the photos (the other numbers were not rescaled). " % (height * 100)
+                          + result["next"])
     if kind == "flat":
         result["flat"] = index.get("flat") if isinstance(index.get("flat"), dict) else None
+        sheet = (result["declaredSize"] or {}).get("sheet")
         result["next"] = ("Flat artwork (a drawing or collage shot once from straight above): no 3D reconstruction is "
                           "needed. Look at the picture with get_view(view='artwork'); put it on a thin panel or frame of "
-                          "the measured size (measurements.sheet, null when unknown); write results to the folder from "
-                          "output_dir.")
+                          "the sheet size in measurements.sheet (source 'declared': the paper the person picked from the "
+                          "app's list, preferred; 'measured': ARKit; null when unknown)"
+                          + ("; the person picked %s (%.1f × %.1f cm)" % (sheet["id"], sheet["shortSideM"] * 100,
+                                                                       sheet["longSideM"] * 100) if sheet else "")
+                          + "; write results to the folder from output_dir.")
     return result
 
 
@@ -502,6 +535,7 @@ def get_original_photos(root: Path, session: str) -> dict:
         "sessionJsonPath": str(folder / "session.json"),
         "workKind": work_kind(data),
         "guidance": guidance(data),
+        "declaredSize": declared_size(data),
         "capturePlan": plan.get("id"),
         "photoCount": len(photos),
         "notes": [
@@ -512,7 +546,10 @@ def get_original_photos(root: Path, session: str) -> dict:
             "+Y up, -Z forward) apply to the unrotated photos/ image. Poses are comparable only within one "
             "referenceFrameId; objectToWorld of that frame gives the object frame (+Y up, +Z towards the front camera).",
             "Flat artwork (workKind flat): no masks; flat.corners are the sheet's corners in the photo (pixels), "
-            "flat.size the measured sheet (null when unknown), flat.rectified the perspective-corrected image.",
+            "flat.size the sheet measured on an ARKit plane (null when unknown), flat.rectified the perspective-corrected image.",
+            "declaredSize is what the person picked or typed in on the iPhone (not measured; null when nothing was "
+            "entered): sheet (flat artwork: the paper from the app's list, id/longSideM/shortSideM, orientation not "
+            "recorded) or heightM (3D work). It takes precedence over flat.size and over the size derived after capture.",
             "Heading-guided capture (guidance heading): referenceFrames[].heading.derivation holds the object centre "
             "derived after capture (closest point to the photos' centre lines, with residualRmsM), the approximate size "
             "and origin: 'base' (objectToWorld origin on the table) or 'center' (table height unknown, basePointWorld null, "

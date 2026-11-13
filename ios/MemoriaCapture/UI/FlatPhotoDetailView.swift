@@ -111,22 +111,30 @@ struct FlatPhotoDetailView: View {
             if let el = photo.direction.elevationDeg {
                 Text("傾き \(String(format: "%.1f", el))°（90° が真下）").font(.subheadline)
             }
+            if let sheet = session?.declaredSheet {
+                Text("紙：\(sheet.displayName)（選んだ大きさ。\(String(format: "%.1f × %.1f cm", sheet.shortSideM * 100, sheet.longSideM * 100))）")
+                    .font(.subheadline)
+            }
             if let flat = photo.flat, flat.corners != nil {
                 Text("紙：見つかりました" + (flat.cornersConfidence.map { "（確からしさ \(String(format: "%.2f", $0))）" } ?? "")).font(.subheadline)
                 if flat.sheetAtFrameEdge == true {
                     Text("紙の角が写真の端に近く、紙の一部が切れているかもしれません").font(.subheadline).foregroundStyle(.orange)
                 }
-                if let size = flat.size {
+                if let size = flat.size, session?.declaredSheet != nil {
+                    // 紙を選んだときは、測った大きさは参考（選んだ大きさを使う）。
+                    Text("参考：測った大きさ \(String(format: "%.1f × %.1f cm", size.widthM * 100, size.heightM * 100))（\(size.planeSource == "existingPlaneGeometry" ? "見つかった机の平面" : "ARKit が推定した平面")で測定）")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if let size = flat.size {
                     Text("大きさ：\(String(format: "%.1f × %.1f cm", size.widthM * 100, size.heightM * 100))（\(size.planeSource == "existingPlaneGeometry" ? "見つかった机の平面" : "ARKit が推定した平面")で測定）")
                         .font(.subheadline)
-                } else {
+                } else if session?.declaredSheet == nil {
                     Text("大きさ：測れませんでした（机の平面が見つからなかった）").font(.subheadline).foregroundStyle(.secondary)
                 }
                 if let r = flat.rectified {
                     Text("直した画像：\(r.width) × \(r.height)").font(.caption).foregroundStyle(.secondary)
                 }
             } else {
-                Text("紙が見つからなかったので、写真の全体をそのまま使います（遠近は直していません・大きさは不明）")
+                Text("紙が見つからなかったので、写真の全体をそのまま使います（遠近は直していません\(session?.declaredSheet == nil ? "・大きさは不明" : "")）")
                     .font(.subheadline).foregroundStyle(.orange)
             }
             if let saved = photo.quality.saved {

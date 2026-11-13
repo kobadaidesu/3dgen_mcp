@@ -49,15 +49,19 @@ pack.json                写真の選び方（向きごとの photoId・実際�
 撮影アプリで「平面（絵・貼り絵など）」を選んだセッション（撮影方向 `flat1`、真上から 1 枚）は、3D 用の出力を作りません。
 
 ```
-brief.md            「平面の作品です」「3D の形を推論・再構成する必要はありません（絵を板や額に貼る形で使える）」、紙の実寸か「分かりません」、注意点
+brief.md            「平面の作品です」「3D の形を推論・再構成する必要はありません（絵を板や額に貼る形で使える）」、紙の大きさ（撮る人が選んだ値か測った値）か「分かりません」、注意点
 views/artwork.jpg   遠近を直してまっすぐにした絵（iPhone が作った rectified/<photoId>.jpg を長い辺 1568 px 以下にしたもの）。
                     補正した画像が無いとき（紙が見つからなかったなど）は、元の写真をまっすぐに回しただけのもの
 views/photo.jpg     補正した画像があるときだけ：元の写真をまっすぐに回したもの（補正が正しいかを見比べる）
-measurements.json   workKind "flat"、method "flatSheetCorners"、sheet（widthM・heightM・widthCm・heightCm・planeSource・photoId。幅は絵の横、高さは縦）。
-                    測れなかったときは status "unavailable"・sheet null と理由（推測で埋めない）。sizeCm・sizeM は null
+measurements.json   workKind "flat"、method "declaredSheet"（撮る人が選んだ紙）か "flatSheetCorners"（ARKit の平面で測った）、
+                    sheet（source "declared" | "measured"、widthM・heightM・widthCm・heightCm（幅は絵の横、高さは縦）、
+                    longSideM・shortSideM・longSideCm・shortSideCm、orientation "landscape" | "portrait"、
+                    declaredSheetId・declaredSheetName（選んだ紙）、planeSource（測った値のとき）、measured（測った値があればいつも）、photoId）。
+                    どちらも無いときは status "unavailable"・sheet null と理由（推測で埋めない）。sizeCm・sizeM は null
 pack.json           workKind "flat"、views（artwork・photo）、flat（使った写真・紙の四隅・紙が端にかかっているか・補正した画像の場所・カメラの傾き）
 ```
 
+- 紙の大きさの優先順：撮る人が一覧から選んだ紙（session.json の `declaredSize.sheet`）→ ARKit の平面で測った実寸（`photos[].flat.size`）→ 分からない。選んだ紙の縦・横の向きは、`views/artwork.jpg` が補正した画像ならその縦横、そうでなければ紙の四隅の辺の長さで決めます（横が縦以上なら横が長い辺）。四隅も無ければ向きは決めず、`widthM`・`heightM` は null（`longSideM`・`shortSideM` だけ）で、`brief.md` に「縦・横の向きは分かりません」と書きます。選んだ紙と測った値の両方があるときは、選んだ紙を使い、測った値を `sheet.measured` と `brief.md` に参考として書きます。
 - `overview.jpg`（方向の一覧）・`hull.obj`・`--cutouts` の PNG は作りません。マスクは使いません。
 - 使う写真：置き換え済みでない（アプリと同じ決まり：一番新しい真上の写真が前の写真を置き換える）、真上（`targetId` あり）、補正した画像がある、紙の四隅がある、画質がよい、新しい、の順。
 
@@ -80,6 +84,13 @@ pack.json           workKind "flat"、views（artwork・photo）、flat（使っ
 - visual hull は作りません（`hull.obj` なし）。
 - `brief.md` には、位置と大きさが撮ったあとに求めた値であること、線の外れ（2 cm 以下ならおおむね合っている）、机の面が分かったか、下と上の目安、信頼度が低い理由を書きます。
 - `pack.json` の `guidance` に案内のしかた（`heading` | `baseCylinder`、平面は null）を書きます。
+
+### 撮る人が入力した高さ（立体の作品）
+
+session.json の `declaredSize.heightM`（新しいセッションで撮る人が入力した高さ。AR で測った値ではない）があれば、どの立体のセッション（`heading`・`baseCylinder`・visual hull）でも：
+
+- `measurements.json` の `declaredHeight` に `heightM`・`heightCm`・`source: "userEntered"`・`note` を書きます（無ければ null）。`sizeM`・`sizeCm`・`heading.size` などの求めた値・測った値は、今までどおりに書き、書き換えたり縮尺を掛けたりしません。
+- `brief.md` の大きさの前に「高さ（撮る人が入力した値）」を書き、写真から求めた大きさよりこの高さを優先すること、幅・奥行きはこの高さとの比が写真と合うように決めることを書きます。
 
 ### 実寸の測り方（visual hull）
 

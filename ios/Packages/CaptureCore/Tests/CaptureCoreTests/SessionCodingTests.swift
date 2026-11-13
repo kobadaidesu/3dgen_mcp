@@ -43,8 +43,9 @@ final class SessionCodingTests: XCTestCase {
 
     func testTopLevelKeysAndValues() throws {
         let j = try json(exampleSession())
-        XCTAssertEqual(Set(j.keys), ["schema", "schemaVersion", "sessionId", "title", "workKind", "createdAt", "updatedAt", "conventions", "device", "object", "referenceFrames", "directionPlan", "photos", "guidance"])
+        XCTAssertEqual(Set(j.keys), ["schema", "schemaVersion", "sessionId", "title", "workKind", "createdAt", "updatedAt", "conventions", "device", "object", "referenceFrames", "directionPlan", "photos", "guidance", "declaredSize"])
         XCTAssertTrue(j["guidance"] is NSNull)  // 後から足した項目。null（と無い）は前の方法（baseCylinder）
+        XCTAssertTrue(j["declaredSize"] is NSNull)  // 後から足した項目。null（と無い）は「入力していない」
         XCTAssertEqual(j["schema"] as? String, "memoria.capture.session")
         XCTAssertEqual(j["workKind"] as? String, "object")  // 後から足した項目。いつも書く
         XCTAssertEqual(j["schemaVersion"] as? Int, 1)
@@ -169,6 +170,7 @@ final class SessionCodingTests: XCTestCase {
         """
         let s = try SessionJSON.makeDecoder().decode(CaptureSession.self, from: Data(text.utf8))
         XCTAssertNil(s.object)
+        XCTAssertNil(s.declaredSize)  // declaredSize の無い前の版のセッションは「入力していない」
         // workKind の無い前の版のセッションは立体、flat の無い写真は null。
         XCTAssertEqual(s.workKind, .object)
         XCTAssertFalse(s.isFlat)

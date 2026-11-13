@@ -548,7 +548,7 @@ final class PackKitTests: XCTestCase {
 
     /// A heading-guided ai5 session on disk: 5 photos (front, right, back, left, top) of a 10 × 6 × 4 cm box around
     /// `center`, recorded with `PhotoRecorder.makeHeadingPhoto`; masks are the projected box (or failed with `masks: false`).
-    func writeHeadingSession(root: URL, masks: Bool = true, derivedOnPhone: Bool = false) throws -> LocatedSession {
+    func writeHeadingSession(root: URL, masks: Bool = true, derivedOnPhone: Bool = false, declaredHeightM: Double? = nil) throws -> LocatedSession {
         let folder = root.appendingPathComponent("sessions/S", isDirectory: true)
         try FileManager.default.createDirectory(at: folder.appendingPathComponent("photos"), withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: folder.appendingPathComponent("masks"), withIntermediateDirectories: true)
@@ -565,7 +565,8 @@ final class PackKitTests: XCTestCase {
         }
         var s = CaptureSession(sessionId: "S", title: "はこ", createdAt: Date(timeIntervalSince1970: 0),
                                device: DeviceInfo(model: "", systemName: "iOS", systemVersion: "", appVersion: "", appBuild: ""),
-                               directionPlan: DirectionPlanPreset.ai5.plan, workKind: .object, guidance: .heading)
+                               directionPlan: DirectionPlanPreset.ai5.plan, workKind: .object, guidance: .heading,
+                               declaredSize: DeclaredSize(heightM: declaredHeightM))
         var frontHeading: Double?
         for (i, (az, el)) in [(0.0, 15.0), (90, 15), (180, 15), (270, 15), (30, 86)].enumerated() {
             let a = az * .pi / 180, e = el * .pi / 180
@@ -700,10 +701,10 @@ final class PackKitTests: XCTestCase {
         return p
     }
 
-    func flatSession(_ photos: [Photo]) -> CaptureSession {
+    func flatSession(_ photos: [Photo], declared: DeclaredSheet? = nil) -> CaptureSession {
         var s = CaptureSession(sessionId: "S", title: "えのぐの絵", createdAt: Date(timeIntervalSince1970: 0),
                                device: DeviceInfo(model: "", systemName: "iOS", systemVersion: "", appVersion: "", appBuild: ""),
-                               directionPlan: DirectionPlanPreset.flat1.plan, workKind: .flat)
+                               directionPlan: DirectionPlanPreset.flat1.plan, workKind: .flat, declaredSize: DeclaredSize(sheet: declared))
         s.photos = photos
         return s
     }
@@ -716,7 +717,7 @@ final class PackKitTests: XCTestCase {
         XCTAssertNil(PackBuilder.chooseFlatPhoto(session: flatSession([])))
     }
 
-    func writeFlatSession(_ photos: [Photo], root: URL) throws -> LocatedSession {
+    func writeFlatSession(_ photos: [Photo], root: URL, declared: DeclaredSheet? = nil) throws -> LocatedSession {
         let folder = root.appendingPathComponent("sessions/S", isDirectory: true)
         for sub in ["photos", "rectified"] {
             try FileManager.default.createDirectory(at: folder.appendingPathComponent(sub), withIntermediateDirectories: true)
@@ -729,7 +730,7 @@ final class PackKitTests: XCTestCase {
                                        to: folder.appendingPathComponent(r.file))
             }
         }
-        return LocatedSession(folder: folder, dataDir: root, session: flatSession(photos), receipt: nil)
+        return LocatedSession(folder: folder, dataDir: root, session: flatSession(photos, declared: declared), receipt: nil)
     }
 
     func testFlatPackageWithRectifiedImageAndSize() throws {
@@ -754,8 +755,12 @@ final class PackKitTests: XCTestCase {
         XCTAssertEqual(m.workKind, "flat")
         XCTAssertEqual(m.status, "ok")
         XCTAssertEqual(m.method, "flatSheetCorners")
+        XCTAssertEqual(m.sheet?.source, "measured")
         XCTAssertEqual(m.sheet?.widthCm, 21)
         XCTAssertEqual(m.sheet?.heightCm, 29.7)
+        XCTAssertEqual(m.sheet?.planeSource, "estimatedPlane")
+        XCTAssertEqual(m.sheet?.measured?.widthCm, 21)
+        XCTAssertNil(m.sheet?.declaredSheetId)
         XCTAssertNil(m.sizeCm)
         XCTAssertNil(m.mesh)
 
@@ -806,6 +811,109 @@ final class PackKitTests: XCTestCase {
         XCTAssertTrue(brief.contains("**大きさは分かりません**"))
         XCTAssertTrue(brief.contains("遠近を直していない"))
         XCTAssertTrue(brief.contains("3D の形を推論・再構成する必要はありません"))
+    }
+
+    // MARK: - declared size (declaredSize: the paper picked from the list, the height typed in)
+
+    func testFlatPackagePrefersTheDeclaredSheet() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-flat-declared-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        // The rectified image is 34 × 48 (portrait) and the ARKit measurement says 21 × 29.7 cm; the person picked 八つ切.
+        let located = try writeFlatSession([flatPhoto(1, rectified: true)], root: root, declared: DeclaredSheet(.yatsugiri))
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        let summary = try PackBuilder(located: located).build(into: out)
+        XCTAssertTrue(summary.contains("27.1 × 39.2 cm (declared)"), summary)
+
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m.status, "ok")
+        XCTAssertEqual(m.method, "declaredSheet")
+        let sheet = try XCTUnwrap(m.sheet)
+        XCTAssertEqual(sheet.source, "declared")
+        XCTAssertEqual(sheet.declaredSheetId, "yatsugiri")
+        XCTAssertEqual(sheet.declaredSheetName, "八つ切")
+        XCTAssertEqual(sheet.orientation, "portrait")
+        XCTAssertEqual(sheet.widthCm, 27.1)
+        XCTAssertEqual(sheet.heightCm, 39.2)
+        XCTAssertEqual(sheet.longSideCm, 39.2)
+        XCTAssertEqual(sheet.shortSideCm, 27.1)
+        XCTAssertNil(sheet.planeSource)
+        XCTAssertEqual(sheet.measured?.widthCm, 21)  // the measurement is kept next to it
+        XCTAssertEqual(sheet.measured?.planeSource, "estimatedPlane")
+        let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: out.appendingPathComponent("measurements.json"))) as! [String: Any]
+        XCTAssertEqual((obj["sheet"] as? [String: Any])?["source"] as? String, "declared")
+
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("| 27.1 cm | 39.2 cm | 撮る人が一覧から選んだ紙の大きさ（八つ切） |"), brief)
+        XCTAssertTrue(brief.contains("撮る人が一覧から選んだ値（八つ切"))
+        XCTAssertTrue(brief.contains("参考：紙の四隅を ARKit の平面"))
+        XCTAssertFalse(brief.contains("**大きさは分かりません**"))
+    }
+
+    func testFlatPackageDeclaredSheetWithoutCornersHasNoOrientation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-flat-declared-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let located = try writeFlatSession([flatPhoto(1, rectified: false, corners: false)], root: root, declared: DeclaredSheet(.a4))
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        let summary = try PackBuilder(located: located).build(into: out)
+        XCTAssertTrue(summary.contains("29.7 × 21.0 cm (declared, orientation unknown)"), summary)
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m.status, "ok")
+        let sheet = try XCTUnwrap(m.sheet)
+        XCTAssertNil(sheet.widthM)
+        XCTAssertNil(sheet.heightCm)
+        XCTAssertNil(sheet.orientation)
+        XCTAssertNil(sheet.measured)
+        XCTAssertEqual(sheet.longSideM, 0.297)
+        XCTAssertEqual(sheet.shortSideM, 0.21)
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("縦・横の向きは分かりません"))
+        XCTAssertFalse(brief.contains("**大きさは分かりません**"))
+    }
+
+    func testResolveSheetOrientsTheDeclaredSheetByTheCorners() throws {
+        // Corners as seen upright: 34 px wide, 48 px tall (portrait); no rectified image.
+        let p = flatPhoto(1, rectified: false, size: false)
+        let declared = try XCTUnwrap(PackBuilder.resolveSheet(session: flatSession([p], declared: DeclaredSheet(.b4)), photo: p, artworkIsRectified: false))
+        XCTAssertEqual(declared.widthM, 0.257)
+        XCTAssertEqual(declared.heightM, 0.364)
+        XCTAssertEqual(declared.orientation, "portrait")
+        // Neither declared nor measured: nil.
+        XCTAssertNil(PackBuilder.resolveSheet(session: flatSession([p]), photo: p, artworkIsRectified: false))
+        // Measured only.
+        let measured = flatPhoto(2, rectified: false)
+        let sheet = try XCTUnwrap(PackBuilder.resolveSheet(session: flatSession([measured]), photo: measured, artworkIsRectified: false))
+        XCTAssertEqual(sheet.source, "measured")
+        XCTAssertEqual(sheet.widthM, 0.21)
+        XCTAssertEqual(sheet.planeSource, "estimatedPlane")
+    }
+
+    func testHeadingPackageCarriesTheDeclaredHeight() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-heading-declared-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let located = try writeHeadingSession(root: root, declaredHeightM: 0.12)
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        _ = try PackBuilder(located: located).build(into: out)
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        let d = try XCTUnwrap(m.declaredHeight)
+        XCTAssertEqual(d.heightM, 0.12)
+        XCTAssertEqual(d.heightCm, 12)
+        XCTAssertEqual(d.source, "userEntered")
+        // The derived size is written as derived (not rescaled to the declared height).
+        XCTAssertEqual(try XCTUnwrap(m.heading?.size?.lowerM).heightM, 0.04, accuracy: 0.01)
+        XCTAssertEqual(m.method, "headingDerived")
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("## 高さ（撮る人が入力した値）"))
+        XCTAssertTrue(brief.contains("**高さは 12.0 cm です。**"))
+        XCTAssertTrue(brief.contains("この高さを優先してください"))
+        XCTAssertTrue(brief.contains("撮ったあとに写真から求めた値"))
+
+        // Without a declared height the field is null.
+        let plain = try writeHeadingSession(root: root.appendingPathComponent("plain"))
+        let out2 = root.appendingPathComponent("plain/for_claude/S", isDirectory: true)
+        _ = try PackBuilder(located: plain).build(into: out2)
+        let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: out2.appendingPathComponent("measurements.json"))) as! [String: Any]
+        XCTAssertTrue(obj["declaredHeight"] is NSNull)
+        XCTAssertFalse(try String(contentsOf: out2.appendingPathComponent("brief.md"), encoding: .utf8).contains("撮る人が入力した値"))
     }
 
     func testObjectPackIndexCarriesWorkKind() throws {

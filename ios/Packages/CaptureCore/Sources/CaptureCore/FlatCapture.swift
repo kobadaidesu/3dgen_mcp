@@ -311,15 +311,22 @@ public enum FlatGeometry {
         return quad.points.contains { $0.x <= mx || $0.y <= my || $0.x >= Double(imageWidth) - mx || $0.y >= Double(imageHeight) - my }
     }
 
-    /// 補正した画像の大きさ（ピクセル）。実寸が測れたときはその縦横比、無ければ四隅の辺の長さ（長い方）の比。
+    /// 補正した画像の大きさ（ピクセル）。縦横比は、撮る人が選んだ紙（`declaredSheet`）があればその比（向きは四隅の辺の長さで
+    /// 決める：横が縦以上なら横が長い辺）、無ければ実寸が測れたときはその比、どちらも無ければ四隅の辺の長さ（長い方）の比。
     /// 長い辺は、四隅の長い方の辺のピクセル数（元の写真より細かくはしない）。
-    public static func rectifiedSize(corners: FlatQuad, size: FlatSheetSize?) -> (width: Int, height: Int)? {
+    public static func rectifiedSize(corners: FlatQuad, size: FlatSheetSize?, declaredSheet: DeclaredSheet? = nil) -> (width: Int, height: Int)? {
         let e = corners.edgeLengths
         let w = max(e.top, e.bottom), h = max(e.left, e.right)
         guard w >= 1, h >= 1 else { return nil }
         let longSide = max(w, h)
         let aspect: Double
-        if let size, size.widthM > 0, size.heightM > 0 { aspect = size.widthM / size.heightM } else { aspect = w / h }
+        if let declared = declaredSheet?.oriented(horizontal: w, vertical: h), declared.widthM > 0, declared.heightM > 0 {
+            aspect = declared.widthM / declared.heightM
+        } else if let size, size.widthM > 0, size.heightM > 0 {
+            aspect = size.widthM / size.heightM
+        } else {
+            aspect = w / h
+        }
         let width = aspect >= 1 ? longSide : longSide * aspect
         let height = aspect >= 1 ? longSide / aspect : longSide
         return (max(1, Int(width.rounded())), max(1, Int(height.rounded())))

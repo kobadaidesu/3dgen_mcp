@@ -228,6 +228,26 @@ class FlatTests(CoreTestBase):
         self.assertEqual(core.get_brief(self.root, AI5)["workKind"], "object")
         self.assertNotIn("flat", core.get_brief(self.root, AI5))
 
+    def test_flat_declared_sheet(self):
+        self.assertIsNone(core.get_brief(self.root, FLAT)["declaredSize"])  # nothing picked: null
+        self.assertNotIn("the person picked yatsugiri", core.get_brief(self.root, FLAT)["next"])
+        folder = self.root / "sessions" / FLAT
+        session = json.loads((folder / "session.json").read_text("utf-8"))
+        session["declaredSize"] = {"sheet": {"id": "yatsugiri", "longSideM": 0.392, "shortSideM": 0.271}, "heightM": 0.5}
+        write(folder / "session.json", session)
+        self.sessions_snapshot = self.snapshot(self.root / "sessions")
+        expected = {"sheet": {"id": "yatsugiri", "longSideM": 0.392, "shortSideM": 0.271}, "heightM": None}  # flat: no height
+        flat = next(s for s in core.list_sessions(self.root)["sessions"] if s["sessionId"] == FLAT)
+        self.assertEqual(flat["declaredSize"], expected)
+        brief = core.get_brief(self.root, FLAT)
+        self.assertEqual(brief["declaredSize"], expected)
+        self.assertIn("the person picked yatsugiri (27.1 × 39.2 cm)", brief["next"])
+        self.assertIn("'declared'", brief["next"])
+        originals = core.get_original_photos(self.root, FLAT)
+        self.assertEqual(originals["declaredSize"], expected)
+        self.assertTrue(any("declaredSize" in n for n in originals["notes"]))
+        self.assertNoSecrets(brief)
+
     def test_flat_original_photos(self):
         result = core.get_original_photos(self.root, FLAT)
         self.assertEqual(result["workKind"], "flat")
@@ -284,6 +304,39 @@ class HeadingTests(CoreTestBase):
         self.assertTrue(any("guidance heading" in n for n in originals["notes"]))
         self.assertIsNone(core.get_original_photos(self.root, AI5)["photos"][0]["heading"])
         self.assertNoSecrets(brief)
+
+
+class DeclaredHeightTests(CoreTestBase):
+    """declaredSize.heightM on 3D work (typed in on the iPhone, not measured)."""
+
+    def setUp(self):
+        super().setUp()
+        folder = self.root / "sessions" / AI5
+        session = json.loads((folder / "session.json").read_text("utf-8"))
+        session["declaredSize"] = {"sheet": {"id": "a4", "longSideM": 0.297, "shortSideM": 0.21}, "heightM": 0.12}
+        write(folder / "session.json", session)
+        self.sessions_snapshot = self.snapshot(self.root / "sessions")
+
+    def test_height_is_reported_and_preferred(self):
+        expected = {"sheet": None, "heightM": 0.12}  # 3D work: the sheet is dropped
+        by_id = {s["sessionId"]: s for s in core.list_sessions(self.root)["sessions"]}
+        self.assertEqual(by_id[AI5]["declaredSize"], expected)
+        self.assertIsNone(by_id[OLD]["declaredSize"])  # sessions from before: null
+        brief = core.get_brief(self.root, AI5)
+        self.assertEqual(brief["declaredSize"], expected)
+        self.assertIn("typed in the height: 12.0 cm", brief["next"])
+        self.assertIn("Prefer it", brief["next"])
+        self.assertNotIn("typed in the height", core.get_brief(self.root, OLD)["next"])
+        self.assertEqual(core.get_original_photos(self.root, AI5)["declaredSize"], expected)
+
+    def test_malformed_declared_size_is_ignored(self):
+        folder = self.root / "sessions" / AI5
+        session = json.loads((folder / "session.json").read_text("utf-8"))
+        for bad in ("12cm", {"heightM": "12"}, {"heightM": True}, [], {"sheet": None, "heightM": None}):
+            session["declaredSize"] = bad
+            write(folder / "session.json", session)
+            self.assertIsNone(core.list_sessions(self.root)["sessions"][0]["declaredSize"], bad)
+        self.sessions_snapshot = self.snapshot(self.root / "sessions")
 
 
 class SessionTests(CoreTestBase):

@@ -59,6 +59,14 @@ WORK_KINDS = ("object", "flat")  # session.json "workKind" (added later; missing
 # session.json "guidance" (added later): how 3D work was guided. Missing or null = "baseCylinder" for 3D work, none for flat.
 GUIDANCES = ("heading", "baseCylinder")
 DERIVATION_STATUSES = ("ok", "lowConfidence", "unknown")
+# session.json "declaredSize" (added later): the size the person picked or typed in (not measured). Missing or null = not entered.
+# Sheets of the app's list (CaptureCore SheetPreset): id -> (Japanese name, short side mm, long side mm).
+SHEET_PRESETS = {
+    "yatsugiri": ("八つ切", 271, 392), "yotsugiri": ("四つ切", 392, 542), "a4": ("A4", 210, 297),
+    "b4": ("B4", 257, 364), "a3": ("A3", 297, 420), "b5": ("B5", 182, 257),
+}
+DECLARED_HEIGHT_RANGE_M = (0.005, 3.0)  # the app accepts 0.5–300 cm
+DECLARED_SHEET_SIDE_RANGE_M = (0.01, 3.0)
 AUTH_FAIL_LIMIT = 20  # failed tokens per client IP within AUTH_FAIL_WINDOW -> 429
 AUTH_FAIL_WINDOW = 300.0
 SIPS_PATH = "/usr/bin/sips"
@@ -319,6 +327,7 @@ def validate_session(path: Path, session_id: str, manifest_paths):
     guidance = data.get("guidance")
     if guidance is not None and guidance not in GUIDANCES:
         errors.append("guidance は %s のどれか（または無し）であるべきです（%r）" % (" / ".join(GUIDANCES), guidance))
+    errors.extend(validate_declared_size(data.get("declaredSize")))
     frames = data.get("referenceFrames")
     if isinstance(frames, list):
         for i, frame in enumerate(frames):
@@ -397,6 +406,51 @@ def validate_flat(flat, label: str, pid: str, manifest_paths):
         elif rfile not in manifest_paths:
             errors.append("%s.flat.rectified.file %s が manifest にありません" % (label, rfile))
     return errors
+
+
+def validate_declared_size(declared):
+    """declaredSize (added later): null/missing is fine. sheet is null or {id, longSideM, shortSideM} with a non-empty id
+    and sides in range (long >= short); heightM is null or 0.005–3 m. Unknown sheet ids are accepted (future lists)."""
+    if declared is None:
+        return []
+    if not isinstance(declared, dict):
+        return ["declaredSize がオブジェクトではありません"]
+    errors = []
+    sheet = declared.get("sheet")
+    if sheet is not None:
+        lo, hi = DECLARED_SHEET_SIDE_RANGE_M
+        if not isinstance(sheet, dict):
+            errors.append("declaredSize.sheet がオブジェクトではありません")
+        else:
+            if not isinstance(sheet.get("id"), str) or not sheet.get("id"):
+                errors.append("declaredSize.sheet.id が文字列ではありません")
+            long_side, short_side = sheet.get("longSideM"), sheet.get("shortSideM")
+            if not all(_is_num(v) and lo <= v <= hi for v in (long_side, short_side)):
+                errors.append("declaredSize.sheet の longSideM・shortSideM は %g〜%g m の数であるべきです" % (lo, hi))
+            elif long_side < short_side:
+                errors.append("declaredSize.sheet の longSideM が shortSideM より短いです")
+    height = declared.get("heightM")
+    if height is not None:
+        lo, hi = DECLARED_HEIGHT_RANGE_M
+        if not (_is_num(height) and lo <= height <= hi):
+            errors.append("declaredSize.heightM は %g〜%g m の数か null であるべきです（%r）" % (lo, hi, height))
+    return errors
+
+
+def declared_size_text(session) -> "str | None":
+    """One line for `show`: the paper picked or the height typed in. None when nothing was entered."""
+    declared = session.get("declaredSize") if isinstance(session, dict) else None
+    if not isinstance(declared, dict):
+        return None
+    parts = []
+    sheet = declared.get("sheet")
+    if isinstance(sheet, dict) and _is_num(sheet.get("longSideM")) and _is_num(sheet.get("shortSideM")):
+        name = SHEET_PRESETS.get(sheet.get("id"), (sheet.get("id"),))[0]
+        parts.append("紙 %s（%.1f × %.1f cm、id %s）" % (name, sheet["shortSideM"] * 100, sheet["longSideM"] * 100, sheet.get("id")))
+    height = declared.get("heightM")
+    if _is_num(height):
+        parts.append("高さ %.1f cm" % (height * 100))
+    return "、".join(parts) or None
 
 
 def _is_num(v) -> bool:
@@ -1283,6 +1337,7 @@ def cmd_show(args) -> int:
     if guidance:
         print("案内         : %s（guidance %s%s）" % (GUIDANCE_LABELS[guidance], guidance,
                                                    "" if session.get("guidance") else "。記録なし＝前の方法"))
+    print("選んだ大きさ : %s" % (declared_size_text(session) or "入力なし（declaredSize null）"))
     for frame in session.get("referenceFrames") or []:
         heading = frame.get("heading") if isinstance(frame, dict) else None
         if not isinstance(heading, dict):
@@ -1326,7 +1381,7 @@ def cmd_show(args) -> int:
         flat = p.get("flat") if isinstance(p.get("flat"), dict) else None
         if flat is not None:
             size = flat.get("size") if isinstance(flat.get("size"), dict) else None
-            print("     用紙 %s  端 %s  実寸 %s  補正 %s" % (
+            print("     用紙 %s  端 %s  測った実寸 %s  補正 %s" % (
                 "あり" if flat.get("corners") else "見つからない",
                 {True: "かかっている", False: "OK"}.get(flat.get("sheetAtFrameEdge"), "-"),
                 "%s × %s cm（%s）" % (num((size.get("widthM") or 0) * 100), num((size.get("heightM") or 0) * 100),
@@ -1392,7 +1447,7 @@ iPhone のアプリから同じネットワーク（自宅の LAN・USB ケー�
 brief.md            最初に読む説明（作品名・実寸と誤差・座標の決まり・写真の一覧・撮れていない範囲・使い方）
 overview.jpg        選んだ写真の一覧（カメラの位置に並べ、上から見た配置で正面が下）と実寸
 views/<向き>.jpg     代表の写真をまっすぐに回し、作品のまわりで切り抜いたもの（背景は写ったまま。長い辺 1568 px 以下）
-measurements.json   実寸（輪郭が 8 枚以上なら visual hull で測った幅 X・奥行き Z・高さ Y と誤差。少ないときは撮影時に合わせた円柱の大きさ＝目安。向きで案内したセッションは撮ったあとに切り抜きから求めたおおよその大きさ）
+measurements.json   実寸（輪郭が 8 枚以上なら visual hull で測った幅 X・奥行き Z・高さ Y と誤差。少ないときは撮影時に合わせた円柱の大きさ＝目安。向きで案内したセッションは撮ったあとに切り抜きから求めたおおよその大きさ。撮る人が高さを入力したときは declaredHeight。平面の作品は sheet に紙の大きさ）
 hull.obj            粗い形（visual hull を作れたときだけ。メートル、+Y が上、+Z が正面、y = 0 が机の面）
 pack.json           写真の選び方・出どころ（sessionId・manifestHash）
 ```
@@ -1416,7 +1471,8 @@ upright/masks/<photoId>.png    同じくマスクの表示用コピー
 - `session.json` の `photos[]` の 1 つが 1 枚の写真です。`photos[].photoId` → `photos/<photoId>.jpg`（`image.file`）。
 - マスクは `photos[].mask.status` が `candidate`（自動で選んだ・未確定）か `confirmed`（ユーザーが確認）のときだけ `masks/<photoId>.png`（`mask.file`）があります。ほかの status（`notGenerated`・`processing`・`failed`・`noObject`）ではマスクはありません。
 - 向きで案内したセッション（`guidance` が `heading`）は、撮るときに底の中心・円柱を決めていません。作品の中心・作品座標（`objectToWorld`）・写真ごとの方位と仰角・おおよその大きさは、撮ったあとに写真の中心の線と切り抜きから求めた値で、`referenceFrames[].heading.derivation` に求め方と線の外れ方（残差）があります。机の高さが分からないときは `basePointWorld` が null で、`objectToWorld` の原点は求めた中心です。
-- 平面の作品（`workKind` が `flat`）はマスクを作りません。`photos[].flat` に、用紙の四隅（`corners`。元写真のピクセル。無ければ null）・実寸（`size`。測れなければ null）・補正した画像（`rectified`）が入ります。
+- 平面の作品（`workKind` が `flat`）はマスクを作りません。`photos[].flat` に、用紙の四隅（`corners`。元写真のピクセル。無ければ null）・ARKit の平面で測った実寸（`size`。測れなければ null）・補正した画像（`rectified`）が入ります。
+- `declaredSize`（後から足した項目。無い・null は「入力していない」）は、撮る人が新しいセッションで選んだ・入力した大きさです（AR で測った値ではない）。平面の作品は `declaredSize.sheet`（一覧から選んだ紙：`id`（`yatsugiri` 八つ切・`yotsugiri` 四つ切・`a4`・`b4`・`a3`・`b5`）・`longSideM`・`shortSideM`。縦・横の向きは書かず、写真の中の紙の形で決める）、立体の作品は `declaredSize.heightM`（入力した高さ）。**選んだ・入力した値があれば、測った値・写真から求めた値より優先します**（紙の大きさ：`declaredSize.sheet` → `photos[].flat.size` → 分からない。立体の高さ：`declaredSize.heightM` を、求めたおおよその大きさより優先する。求めた大きさは書き換えない）。
 - カメラの姿勢 `camera.cameraToWorld`、内部パラメータ `camera.intrinsics`（K）、方向 `direction` は写真ごとです。`direction.confirmed` が false の写真の方向は参考値です。
 - 別の `referenceFrameId` の写真どうしの姿勢は比べられません（同じ世界座標とは限らない）。
 

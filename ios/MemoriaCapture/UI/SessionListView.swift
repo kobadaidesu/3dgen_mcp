@@ -7,7 +7,7 @@ struct SessionListView: View {
     @EnvironmentObject private var settings: AppSettings
     @State private var showingNew = false
     /// 「撮影を始める」を押した内容（シートを閉じてから撮影画面を開く）。
-    @State private var pendingNew: (title: String, kind: WorkKind)?
+    @State private var pendingNew: (title: String, kind: WorkKind, declared: DeclaredSize?)?
     @State private var pendingDelete: SessionSummary?
 
     var body: some View {
@@ -71,8 +71,8 @@ struct SessionListView: View {
         .refreshable { model.reloadSessions() }
         .onAppear { model.reloadSessions() }
         .sheet(isPresented: $showingNew, onDismiss: startPendingSession) {
-            NewSessionSheet { title, kind in
-                pendingNew = (title, kind)
+            NewSessionSheet { title, kind, declared in
+                pendingNew = (title, kind, declared)
                 showingNew = false
             }
         }
@@ -91,7 +91,7 @@ extension SessionListView {
     private func startPendingSession() {
         guard let pending = pendingNew else { return }
         pendingNew = nil
-        if let session = model.createSession(title: pending.title, workKind: pending.kind) {
+        if let session = model.createSession(title: pending.title, workKind: pending.kind, declaredSize: pending.declared) {
             model.open(.capture(sessionId: session.sessionId, preferredTargetId: nil))
         }
     }
@@ -149,12 +149,17 @@ struct SessionRow: View {
 }
 
 /// 新しいセッション：作品名と、作品の種類（立体・平面）を選ぶ。種類で撮り方が変わる（自動では見分けない）。
+/// 大きさは撮る人が選ぶ・入力する（平面は紙の大きさを一覧から、立体は高さを cm で。どちらも省略できる）。
 struct NewSessionSheet: View {
-    let onStart: (String, WorkKind) -> Void
+    let onStart: (String, WorkKind, DeclaredSize?) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var kind: WorkKind = .object
+    /// 選んだ紙の id（`SheetPreset`）。空は「わからない」。
+    @State private var sheetId = ""
+    /// 高さ（cm）の入力。空でよい。
+    @State private var heightText = ""
 
     var body: some View {
         NavigationStack {
@@ -191,6 +196,36 @@ struct NewSessionSheet: View {
                 } footer: {
                     Text("迷ったら：机に置いて真横から見たとき、形が見えるなら立体、ほぼ紙の厚みだけなら平面です。紙に毛糸などを貼った絵は、どちらにしてもかまいません。")
                 }
+                if kind == .flat {
+                    Section {
+                        Picker("紙の大きさ", selection: $sheetId) {
+                            Text("わからない").tag("")
+                            ForEach(SheetPreset.allCases) { preset in
+                                Text(preset.label).tag(preset.rawValue)
+                            }
+                        }
+                    } header: {
+                        Text("紙の大きさ")
+                    } footer: {
+                        Text("選んだ大きさを作品の大きさとして使います。分からなければ「わからない」のままでかまいません。")
+                    }
+                } else {
+                    Section {
+                        HStack {
+                            TextField("例：12", text: $heightText)
+                                .keyboardType(.decimalPad)
+                            Text("cm").foregroundStyle(.secondary)
+                        }
+                        if heightIsInvalid {
+                            Text("0.5〜300 cm の数を入れてください（このままでは高さを使いません）")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
+                    } header: {
+                        Text("高さ（cm・分かれば）")
+                    } footer: {
+                        Text("机から作品の一番上までの高さです。空でもかまいません。入れると、写真から求めたおおよその大きさより優先します。")
+                    }
+                }
             }
             .navigationTitle("新しく撮る")
             .navigationBarTitleDisplayMode(.inline)
@@ -199,10 +234,23 @@ struct NewSessionSheet: View {
                     Button("やめる") { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("撮影を始める") { onStart(title, kind) }
+                    Button("撮影を始める") { onStart(title, kind, declaredSize) }
                 }
             }
         }
+    }
+}
+
+extension NewSessionSheet {
+    /// 選んだ・入力した大きさ（作品の種類に合わせる。どちらも無ければ nil）。
+    private var declaredSize: DeclaredSize? {
+        DeclaredSize(sheet: SheetPreset(rawValue: sheetId).map { DeclaredSheet($0) },
+                     heightM: DeclaredSize.heightM(fromCentimetres: heightText)).normalized(for: kind)
+    }
+
+    /// 高さに何か入っているのに、使える数ではない。
+    private var heightIsInvalid: Bool {
+        !heightText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && DeclaredSize.heightM(fromCentimetres: heightText) == nil
     }
 }
 

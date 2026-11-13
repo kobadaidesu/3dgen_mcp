@@ -796,6 +796,89 @@ class HeadingSessionTests(ReceiverTestCase):
         self.assertIn("底の中心と円柱で案内（guidance baseCylinder。記録なし＝前の方法）", out.getvalue())
 
 
+class DeclaredSizeTests(ReceiverTestCase):
+    """declaredSize (added later): the paper picked from the list (flat) or the height typed in (3D). Not measured."""
+
+    def test_declared_sheet_and_height_are_accepted_and_shown(self):
+        flat, _ = make_flat_capture(size=False)
+        flat.session["declaredSize"] = {"sheet": {"id": "yatsugiri", "longSideM": 0.392, "shortSideM": 0.271}, "heightM": None}
+        flat.set_session(flat.session)
+        self.send(flat)
+        obj = make_heading_capture()
+        obj.session["declaredSize"] = {"sheet": None, "heightM": 0.12}
+        obj.set_session(obj.session)
+        self.send(obj)
+        self.assertEqual(json.loads((self.published(flat) / "session.json").read_text("utf-8"))["declaredSize"]["sheet"]["id"],
+                         "yatsugiri")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(mr.main(["show", flat.sid[:8], "--data-dir", str(self.data_dir)]), 0)
+            self.assertEqual(mr.main(["show", obj.sid[:8], "--data-dir", str(self.data_dir)]), 0)
+        text = out.getvalue()
+        self.assertIn("選んだ大きさ : 紙 八つ切（27.1 × 39.2 cm、id yatsugiri）", text)
+        self.assertIn("選んだ大きさ : 高さ 12.0 cm", text)
+        self.assertIn("測った実寸 不明", text)
+
+    def test_missing_or_null_declared_size_is_fine(self):
+        cap = Capture()
+        self.send(cap)  # no declaredSize key (sessions from before)
+        nulled = Capture()
+        nulled.session["declaredSize"] = None
+        nulled.set_session(nulled.session)
+        self.send(nulled)
+        unknown_id = make_flat_capture()[0]
+        unknown_id.session["declaredSize"] = {"sheet": {"id": "custom", "longSideM": 0.5, "shortSideM": 0.3}}
+        unknown_id.set_session(unknown_id.session)
+        self.send(unknown_id)  # ids outside today's list are accepted (a later list may add some)
+        self.assertEqual(len(self.index()), 3)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            mr.main(["show", cap.sid[:8], "--data-dir", str(self.data_dir)])
+        self.assertIn("選んだ大きさ : 入力なし", out.getvalue())
+
+    def test_invalid_declared_size(self):
+        def not_object(cap):
+            cap.session["declaredSize"] = "A4"
+
+        def sheet_not_object(cap):
+            cap.session["declaredSize"] = {"sheet": "a4"}
+
+        def sheet_without_id(cap):
+            cap.session["declaredSize"] = {"sheet": {"longSideM": 0.297, "shortSideM": 0.21}}
+
+        def sheet_side_out_of_range(cap):
+            cap.session["declaredSize"] = {"sheet": {"id": "a4", "longSideM": 297, "shortSideM": 210}}
+
+        def sheet_sides_swapped(cap):
+            cap.session["declaredSize"] = {"sheet": {"id": "a4", "longSideM": 0.21, "shortSideM": 0.297}}
+
+        def height_too_small(cap):
+            cap.session["declaredSize"] = {"heightM": 0.001}
+
+        def height_too_large(cap):
+            cap.session["declaredSize"] = {"heightM": 12}
+
+        def height_not_number(cap):
+            cap.session["declaredSize"] = {"heightM": "12cm"}
+
+        def height_bool(cap):
+            cap.session["declaredSize"] = {"heightM": True}
+
+        for mutate in (not_object, sheet_not_object, sheet_without_id, sheet_side_out_of_range, sheet_sides_swapped,
+                       height_too_small, height_too_large, height_not_number, height_bool):
+            with self.subTest(mutate.__name__):
+                cap = Capture()
+                mutate(cap)
+                cap.set_session(cap.session)
+                upload_id = self.upload_all(cap)
+                status, body = self.commit(cap, upload_id)
+                self.assertEqual((status, body["status"]), (422, "invalid"), body)
+                self.assertFalse(self.published(cap).exists())
+
+    def test_readme_explains_declared_size(self):
+        self.assertIn("declaredSize", (self.data_dir / "README.md").read_text("utf-8"))
+
+
 class DisconnectLogTests(ReceiverTestCase):
     def _handle_error(self, error):
         out, err = io.StringIO(), io.StringIO()

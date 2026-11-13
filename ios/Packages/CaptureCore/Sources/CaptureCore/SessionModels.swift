@@ -63,6 +63,9 @@ public struct CaptureSession: Codable, Equatable, Sendable {
     /// 立体の作品の撮影の案内のしかた（`heading`：向きで案内 | `baseCylinder`：底の中心と円柱）。平面の作品は null。
     /// 後から足した項目で、キーが無い・null の立体のセッションは `baseCylinder`（`captureGuidance`）。書くときはいつも書く。
     @NullCodable public var guidance: CaptureGuidance?
+    /// 撮る人が選んだ・入力した大きさ（平面：一覧から選んだ紙、立体：入力した高さ）。AR で測った値ではない。
+    /// 後から足した項目で、キーが無い・null は「入力していない」。どちらも入力していなければ null（DeclaredSize.swift）。
+    @NullCodable public var declaredSize: DeclaredSize?
     public var createdAt: Date
     public var updatedAt: Date
     public var conventions: [String: String]
@@ -81,7 +84,8 @@ public struct CaptureSession: Codable, Equatable, Sendable {
         device: DeviceInfo,
         directionPlan: DirectionPlan,
         workKind: WorkKind = .object,
-        guidance: CaptureGuidance? = nil
+        guidance: CaptureGuidance? = nil,
+        declaredSize: DeclaredSize? = nil
     ) {
         schema = SessionSchema.name
         schemaVersion = SessionSchema.version
@@ -89,6 +93,7 @@ public struct CaptureSession: Codable, Equatable, Sendable {
         self.title = title
         self.workKind = workKind
         self.guidance = workKind == .flat ? nil : guidance
+        self.declaredSize = declaredSize?.normalized(for: workKind)
         self.createdAt = createdAt
         updatedAt = createdAt
         conventions = Conventions.text

@@ -183,6 +183,15 @@ public enum Brief {
         out.append("- まず `overview.jpg` を見てください（選んだ写真の一覧。カメラが立っていた位置に並べてあり、上から見た配置で正面が下、中央が上から見た写真）。")
         out.append("")
 
+        // Height typed in by the person (preferred over the sizes below; those are not rescaled).
+        if let d = m.declaredHeight {
+            out.append("## 高さ（撮る人が入力した値）")
+            out.append("")
+            out.append("- **高さは \(f1(d.heightCm)) cm です。** 撮る人が撮影アプリで入力した値で、AR や写真で測った値ではありません（`measurements.json` の `declaredHeight`）。")
+            out.append("- 下の写真から求めた大きさより、**この高さを優先してください**。幅・奥行きは、この高さとの比が写真と合うように決めてください（下の値は求めたままで、この高さに合わせて書き換えたり縮尺を掛けたりはしていません）。")
+            out.append("")
+        }
+
         // Size
         if m.method == "headingDerived" {
             headingSections(m, session: session, into: &out)
@@ -299,6 +308,9 @@ public enum Brief {
         } else {
             out.append("3. 大きさは上の実測（`measurements.json` の `sizeM`）に合わせる。`hull.obj` を読み込んで、外形がその中に収まるように作ると位置と大きさがそろう。")
         }
+        if let d = m.declaredHeight {
+            out.append("   ただし高さは、撮る人が入力した \(f1(d.heightCm)) cm を優先する（上の「高さ（撮る人が入力した値）」）。")
+        }
         out.append(m.method == "headingDerived" && m.heading?.origin != "base"
                    ? "4. 正面は +Z、上は +Y、単位はメートル。y = 0 は求めた中心の高さ（机の面ではない）。"
                    : "4. 正面は +Z、上は +Y、単位はメートル、y = 0 が机の面。")
@@ -314,7 +326,7 @@ public enum Brief {
         out.append("- manifestHash（`_receipt.json`）：`\(provenance.manifestHash ?? "なし")`")
         out.append("- 受信：\(provenance.receivedAt ?? "記録なし")")
         out.append("- 作成：\(provenance.generatedAt)（\(provenance.tool) \(provenance.toolVersion)）")
-        out.append("- 機械で読む一覧：`pack.json`（写真の選び方・切り抜きの範囲・撮れている範囲）、`measurements.json`（実寸・写真ごとのずれ・注意）")
+        out.append("- 機械で読む一覧：`pack.json`（写真の選び方・切り抜きの範囲・撮れている範囲）、`measurements.json`（実寸・写真ごとのずれ・注意。撮る人が高さを入力したときは `declaredHeight`）")
         out.append("")
         return out.joined(separator: "\n")
     }

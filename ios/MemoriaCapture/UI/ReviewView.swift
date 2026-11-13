@@ -146,6 +146,16 @@ struct ReviewView: View {
         return model.store.photoURL(sessionId, photoId: photo.photoId)
     }
 
+    /// 撮る人が選んだ・入力した大きさ（新しいセッションを作るときに決めたもの）。
+    private func declaredSizeText(_ session: CaptureSession) -> String {
+        if session.isFlat {
+            guard let sheet = session.declaredSheet else { return "紙の大きさ：選んでいません（机の平面で測れたときはその大きさを使います）" }
+            return "紙：\(sheet.displayName)（選んだ大きさ。\(String(format: "%.1f × %.1f cm", sheet.shortSideM * 100, sheet.longSideM * 100))）"
+        }
+        guard let height = session.declaredHeightM else { return "高さ：入力していません" }
+        return String(format: "高さ：%.1f cm（入力した値。写真から求めた大きさより優先します）", height * 100)
+    }
+
     private func summary(_ session: CaptureSession) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             if session.isFlat {
@@ -157,6 +167,8 @@ struct ReviewView: View {
             if let readiness {
                 ReadinessView(readiness: readiness)
             }
+            Label(declaredSizeText(session), systemImage: "ruler")
+                .font(.caption).foregroundStyle(.secondary)
             if session.usesHeadingGuidance {
                 HeadingDerivationSummary(session: session)
             }

@@ -102,7 +102,11 @@ struct FlatCaptureView: View {
         if !shot.sheetFound { parts.append("紙は見つからず（写真全体）") }
         if shot.sheetAtEdge { parts.append("紙が端で切れているかも") }
         if !shot.overhead { parts.append("真上ではない") }
-        if shot.sheetFound { parts.append(shot.sizeText.map { "大きさ \($0)" } ?? "大きさは測れず") }
+        if let sheet = controller.declaredSheet {
+            parts.append("紙 \(sheet.displayName)（選んだ大きさ）")
+        } else if shot.sheetFound {
+            parts.append(shot.sizeText.map { "大きさ \($0)" } ?? "大きさは測れず")
+        }
         return parts.joined(separator: "・")
     }
 
@@ -115,6 +119,13 @@ struct FlatCaptureView: View {
             EmptyView()
         case .capturing:
             VStack(spacing: 10) {
+                if let sheet = controller.declaredSheet {
+                    Text("紙：\(sheet.displayName)（選んだ大きさ）")
+                        .font(.caption)
+                        .padding(.horizontal, 8).padding(.vertical, 4)
+                        .background(.black.opacity(0.5), in: Capsule())
+                        .foregroundStyle(.white)
+                }
                 if let tilt = controller.lookDownDeg {
                     Text("傾き \(Int(tilt.rounded()))°（\(Int(DirectionPlanPreset.flatTopElevation - DirectionPlanPreset.flatTopElevationTolerance))° 以上で真上）")
                         .font(.caption.monospacedDigit())

@@ -164,12 +164,14 @@ public final class SessionStore: @unchecked Sendable {
     }
 
     /// - Parameter guidance: 立体の作品の案内のしかた。nil なら立体は `baseCylinder`（平面の作品はいつも null）。
+    /// - Parameter declaredSize: 撮る人が選んだ・入力した大きさ（平面は紙、立体は高さだけを残す）。nil・空なら null。
     public func createSession(title: String, device: DeviceInfo, plan: DirectionPlan, workKind: WorkKind = .object,
-                              guidance: CaptureGuidance? = nil, now: Date = Date()) throws -> CaptureSession {
+                              guidance: CaptureGuidance? = nil, now: Date = Date(),
+                              declaredSize: DeclaredSize? = nil) throws -> CaptureSession {
         lock.lock(); defer { lock.unlock() }
         let id = Self.newId()
         let session = CaptureSession(sessionId: id, title: title, createdAt: now, device: device, directionPlan: plan, workKind: workKind,
-                                     guidance: workKind == .flat ? nil : (guidance ?? .baseCylinder))
+                                     guidance: workKind == .flat ? nil : (guidance ?? .baseCylinder), declaredSize: declaredSize)
         let dir = sessionDirectory(id)
         do {
             try fileManager.createDirectory(at: dir.appendingPathComponent("photos"), withIntermediateDirectories: true)

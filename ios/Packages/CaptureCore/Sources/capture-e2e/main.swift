@@ -1,10 +1,13 @@
 // capture-e2e：小さな合成セッションを作って、受信側（receiver/memoria_receiver.py）へ送る確認ツール（macOS）。
 //
-//   swift run capture-e2e http://127.0.0.1:8765 123456 [--keep] [--flat | --heading]
+//   swift run capture-e2e http://127.0.0.1:8765 123456 [--keep] [--flat [--sheet=<紙の id>] | --heading [--height-cm=<高さ>]]
 //
 // 1. 一時フォルダに SessionStore で合成セッション（写真 3 枚・マスク 2 枚）を作る
 //    --flat のときは平面の作品のセッション（workKind flat・flat1。真上の写真 1 枚・用紙の四隅・実寸・補正した画像）
+//      --sheet=yatsugiri などで、撮る人が選んだ紙（declaredSize.sheet。id は SheetPreset）も付ける
 //    --heading のときは向きで案内した立体のセッション（guidance heading・ai5。5 枚・十字のまわりのマスク・撮ったあとに求めた中心と大きさ）
+//      --height-cm=12 などで、撮る人が入力した高さ（declaredSize.heightM）も付ける
+//    どちらのオプションも付けなければ declaredSize は null（今までどおり）
 // 2. 送る → complete を期待
 // 3. もう一度送る → alreadyComplete を期待
 // 4. 作品名を変えて送る → 新しい manifestHash で complete を期待（受信側は前の版を replaced/ へ）
@@ -43,10 +46,38 @@ let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("--") }
 let keep = CommandLine.arguments.contains("--keep")
 let flatMode = CommandLine.arguments.contains("--flat")
 let headingMode = CommandLine.arguments.contains("--heading")
+let usage = "使い方: capture-e2e <受信側の URL（http://IP:port）> <ペアリングコード> [--keep] [--flat [--sheet=<紙の id>] | --heading [--height-cm=<高さ>]]"
 guard args.count >= 2, let receiverURL = TransferClient.receiverURL(fromUserInput: args[args.startIndex]) else {
-    print("使い方: capture-e2e <受信側の URL（http://IP:port）> <ペアリングコード> [--keep] [--flat | --heading]")
+    print(usage)
     exit(2)
 }
+
+/// `--name=value` の value（無ければ nil）。
+func optionValue(_ name: String) -> String? {
+    let prefix = "--\(name)="
+    return CommandLine.arguments.first { $0.hasPrefix(prefix) }.map { String($0.dropFirst(prefix.count)) }
+}
+
+/// 撮る人が選んだ紙（--sheet=<id>）。--flat のときだけ使う。
+let declaredSheet: DeclaredSheet? = {
+    guard let id = optionValue("sheet") else { return nil }
+    guard let preset = SheetPreset(rawValue: id) else {
+        print("--sheet は \(SheetPreset.allCases.map(\.rawValue).joined(separator: " / ")) のどれかです（\(id)）")
+        exit(2)
+    }
+    return DeclaredSheet(preset)
+}()
+/// 撮る人が入力した高さ（--height-cm=<cm>）。--heading のときだけ使う。
+let declaredHeightM: Double? = {
+    guard let text = optionValue("height-cm") else { return nil }
+    guard let height = DeclaredSize.heightM(fromCentimetres: text) else {
+        print("--height-cm は \(DeclaredSize.minimumHeightCm)〜\(DeclaredSize.maximumHeightCm) の数です（\(text)）")
+        exit(2)
+    }
+    return height
+}()
+if declaredSheet != nil && !flatMode { print("注意: --sheet は --flat のときだけ使います（無視します）") }
+if declaredHeightM != nil && !headingMode { print("注意: --height-cm は --heading のときだけ使います（無視します）") }
 let token = args[args.startIndex + 1]
 
 let root = FileManager.default.temporaryDirectory.appendingPathComponent("capture-e2e-\(UUID().uuidString)")
@@ -68,7 +99,8 @@ let sessionId = session.sessionId
 func makeFlatSession() -> CaptureSession {
     var session: CaptureSession
     do {
-        session = try store.createSession(title: "e2e 平面の絵", device: device, plan: DirectionPlanPreset.flat1.plan, workKind: .flat)
+        session = try store.createSession(title: "e2e 平面の絵", device: device, plan: DirectionPlanPreset.flat1.plan, workKind: .flat,
+                                          declaredSize: DeclaredSize(sheet: declaredSheet))
     } catch {
         fail("セッションを作れません: \(error)")
     }
@@ -94,7 +126,8 @@ func makeFlatSession() -> CaptureSession {
         c.setFillColor(CGColor(red: 0.9, green: 0.2, blue: 0.2, alpha: 1))
         c.fillEllipse(in: CGRect(x: box.midX - 40, y: Double(height) - box.midY - 40, width: 80, height: 80))
     }
-    guard let rs = FlatGeometry.rectifiedSize(corners: quad, size: size) else { fail("補正した画像の大きさ") }
+    guard session.declaredSheet == declaredSheet else { fail("選んだ紙を記録できません") }
+    guard let rs = FlatGeometry.rectifiedSize(corners: quad, size: size, declaredSheet: session.declaredSheet) else { fail("補正した画像の大きさ") }
     let rectified = encodeImage(width: rs.width, height: rs.height, gray: false, type: .jpeg) { c in
         c.setFillColor(CGColor(red: 0.97, green: 0.97, blue: 0.95, alpha: 1))
         c.fill(CGRect(x: 0, y: 0, width: rs.width, height: rs.height))
@@ -125,7 +158,8 @@ func makeFlatSession() -> CaptureSession {
         fail("写真を保存できません: \(error)")
     }
     guard let p = session.photos.first, p.direction.targetId == "top-e90", p.flat?.rectified != nil else { fail("平面の写真の記録が想定と違います") }
-    print(String(format: "平面の作品：用紙 %.3f × %.3f m、補正した画像 %d × %d", size.widthM, size.heightM, rs.width, rs.height))
+    print(String(format: "平面の作品：用紙 %.3f × %.3f m、補正した画像 %d × %d", size.widthM, size.heightM, rs.width, rs.height)
+          + (session.declaredSheet.map { "、選んだ紙 \($0.id)" } ?? "、紙は選んでいない"))
     return session
 }
 
@@ -134,7 +168,8 @@ func makeFlatSession() -> CaptureSession {
 func makeHeadingSession() -> CaptureSession {
     var session: CaptureSession
     do {
-        session = try store.createSession(title: "e2e 向きの案内", device: device, plan: DirectionPlanPreset.ai5.plan, workKind: .object, guidance: .heading)
+        session = try store.createSession(title: "e2e 向きの案内", device: device, plan: DirectionPlanPreset.ai5.plan, workKind: .object, guidance: .heading,
+                                          declaredSize: DeclaredSize(heightM: declaredHeightM))
     } catch {
         fail("セッションを作れません: \(error)")
     }
@@ -210,8 +245,10 @@ func makeHeadingSession() -> CaptureSession {
     guard let d = session.referenceFrames.last?.heading?.derivation, let c = d.centerWorld?.simd, let size = d.size, size.isKnown else {
         fail("中心か大きさを求められません")
     }
+    guard session.declaredHeightM == declaredHeightM else { fail("入力した高さを記録できません") }
     print(String(format: "向きの案内：中心のずれ %.1f mm、大きさ %.1f × %.1f × %.1f cm（下の目安 %.1f × %.1f × %.1f）", simd_distance(c, center) * 1000,
-                 size.widthM! * 100, size.depthM! * 100, size.heightM! * 100, size.lowerM!.widthM * 100, size.lowerM!.depthM * 100, size.lowerM!.heightM * 100))
+                 size.widthM! * 100, size.depthM! * 100, size.heightM! * 100, size.lowerM!.widthM * 100, size.lowerM!.depthM * 100, size.lowerM!.heightM * 100)
+          + (session.declaredHeightM.map { String(format: "、入力した高さ %.1f cm", $0 * 100) } ?? "、高さは入力していない"))
     return session
 }
 
