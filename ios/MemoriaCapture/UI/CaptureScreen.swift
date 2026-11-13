@@ -4,6 +4,7 @@ import CaptureCore
 import SwiftUI
 
 /// 撮影画面：カメラの許可と AR の対応を確かめてから、AR の撮影を出す。
+/// 平面の作品（`workKind` が `flat`）は真上から 1 枚の撮影（`FlatCaptureView`）、立体は今までの撮影（`CaptureView`）。
 struct CaptureScreen: View {
     let sessionId: String
     let preferredTargetId: String?
@@ -24,7 +25,11 @@ struct CaptureScreen: View {
             } else {
                 switch permission {
                 case .authorized:
-                    CaptureView(sessionId: sessionId, preferredTargetId: preferredTargetId, model: model)
+                    if model.loadSession(sessionId)?.isFlat == true {
+                        FlatCaptureView(sessionId: sessionId, model: model)
+                    } else {
+                        CaptureView(sessionId: sessionId, preferredTargetId: preferredTargetId, model: model)
+                    }
                 case .notDetermined:
                     ProgressView("カメラの許可を確認しています")
                         .task {

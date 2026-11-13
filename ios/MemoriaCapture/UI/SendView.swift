@@ -86,7 +86,7 @@ struct SendView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!canSend)
             } footer: {
-                Text("同じネットワーク（自宅の Wi-Fi・USB ケーブル・インターネット共有）の Mac に、写真・切り抜き・session.json を送ります。途中で止まっても、もう一度送ると続きから送ります。公開 IP アドレス（インターネットの向こう）には送りません。")
+                Text("同じネットワーク（自宅の Wi-Fi・USB ケーブル・インターネット共有）の Mac に、写真・切り抜き（平面の作品は遠近を直した画像）・session.json を送ります。途中で止まっても、もう一度送ると続きから送ります。公開 IP アドレス（インターネットの向こう）には送りません。")
             }
         }
         .navigationTitle("Mac へ送る")

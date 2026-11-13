@@ -13,7 +13,7 @@ final class AppSettings: ObservableObject {
     @Published var receiverName: String { didSet { defaults.set(receiverName, forKey: Keys.receiverName) } }
     /// 6 桁のペアリングコード。
     @Published var pairingCode: String { didSet { defaults.set(pairingCode, forKey: Keys.pairingCode) } }
-    /// 新しいセッションで使う撮影方向。
+    /// 新しい立体の作品のセッションで使う撮影方向（平面の作品はいつも flat1）。
     @Published var planPreset: DirectionPlanPreset { didSet { defaults.set(planPreset.rawValue, forKey: Keys.planPreset) } }
     /// 条件がそろったら自動で撮る。
     @Published var autoCaptureEnabled: Bool { didSet { defaults.set(autoCaptureEnabled, forKey: Keys.autoCapture) } }
@@ -34,7 +34,9 @@ final class AppSettings: ObservableObject {
         receiverURLString = defaults.string(forKey: Keys.receiverURL) ?? ""
         receiverName = defaults.string(forKey: Keys.receiverName) ?? ""
         pairingCode = defaults.string(forKey: Keys.pairingCode) ?? ""
-        planPreset = defaults.string(forKey: Keys.planPreset).flatMap(DirectionPlanPreset.init(rawValue:)) ?? .default
+        // 立体の作品の撮り方だけ（flat1 は「平面」を選んだセッションが使う）。
+        let stored = defaults.string(forKey: Keys.planPreset).flatMap(DirectionPlanPreset.init(rawValue:)) ?? .default
+        planPreset = stored == .flat1 ? .default : stored
         autoCaptureEnabled = defaults.object(forKey: Keys.autoCapture) as? Bool ?? true
     }
 

@@ -15,6 +15,7 @@ enum Route: Hashable {
 struct SessionSummary: Identifiable, Equatable {
     let id: String
     let title: String
+    let workKind: WorkKind
     let photoCount: Int
     let confirmedDirections: Int
     let totalDirections: Int
@@ -80,8 +81,9 @@ final class AppModel: ObservableObject {
             let summaries = store.listSessions().map { session -> SessionSummary in
                 let covered = Coverage.coveredTargetIds(in: session)
                 return SessionSummary(
-                    id: session.sessionId, title: session.title, photoCount: session.photos.count,
-                    confirmedDirections: covered.count, totalDirections: session.directionPlan.targets.count,
+                    id: session.sessionId, title: session.title, workKind: session.workKind, photoCount: session.photos.count,
+                    confirmedDirections: session.isFlat ? Readiness.make(session: session).doneCount : covered.count,
+                    totalDirections: session.directionPlan.targets.count,
                     maskReady: session.photos.filter { $0.mask.status.hasFile }.count,
                     maskProcessing: session.photos.filter { $0.mask.status == .processing || pending.contains($0.photoId) }.count,
                     maskFailed: session.photos.filter { $0.mask.status == .failed || $0.mask.status == .noObject }.count,
@@ -97,11 +99,14 @@ final class AppModel: ObservableObject {
         try? store.loadSession(id)
     }
 
-    func createSession(title: String) -> CaptureSession? {
+    /// 新しいセッション。作品の種類で撮り方が決まる（平面は真上から 1 枚、立体は設定の撮る方向）。
+    func createSession(title: String, workKind: WorkKind) -> CaptureSession? {
         do {
             let session = try store.createSession(
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines),
-                device: DeviceInfoProvider.current(), plan: settings.planPreset.plan
+                device: DeviceInfoProvider.current(),
+                plan: DirectionPlanPreset.plan(for: workKind, objectPreset: settings.planPreset),
+                workKind: workKind
             )
             sessionChanged()
             return session
@@ -133,10 +138,16 @@ final class AppModel: ObservableObject {
         transfer.isSending(sessionId) || store.isBusy(sessionId)
     }
 
-    /// 途中で止まったマスクの処理と、まだ作っていないマスクを作り直す。
+    /// 途中で止まったマスクの処理と、まだ作っていないマスクを作り直す。平面の作品はマスクを作らない（明るさ・ブレだけ）。
     private func resumeUnfinishedMasks() {
         store.recoverInterruptedMasks()
         for session in store.listSessions() {
+            if session.isFlat {
+                for photo in session.photos where photo.quality.saved == nil {
+                    masks.enqueue(sessionId: session.sessionId, photoId: photo.photoId)
+                }
+                continue
+            }
             // 確かめの結果（mask.check）の無いマスクは、確かめだけする。
             for photo in session.photos where photo.mask.status == .notGenerated || photo.quality.saved == nil
                 || (photo.mask.status.hasFile && photo.mask.check == nil) {

@@ -69,7 +69,8 @@ final class MaskProcessor: @unchecked Sendable {
         }
         guard let session = try? store.loadSession(sessionId), let photo = session.photo(id: photoId) else { return }
         let imageURL = store.photoURL(sessionId, photoId: photoId)
-        let region = SavedPhotoAnalyzer.objectRegion(photo: photo, session: session)
+        // 平面の作品は用紙の範囲（あれば）、立体は作品の円柱を投影した範囲で明るさ・シャープさを測る。
+        let region = session.isFlat ? photo.flat?.corners?.boundingBox : SavedPhotoAnalyzer.objectRegion(photo: photo, session: session)
 
         autoreleasepool {
             // 1. 保存した写真の明るさ・シャープさ。
@@ -80,6 +81,8 @@ final class MaskProcessor: @unchecked Sendable {
                     if let i = s.photos.firstIndex(where: { $0.photoId == photoId }) { s.photos[i].quality.saved = saved }
                 }
             }
+            // 平面の作品はマスクを作らない（作品の範囲は用紙の四隅 `flat.corners` で記録する）。
+            if session.isFlat { return }
             // 2. マスク。最初は未生成のときだけ（ユーザーが選んだもの・確定したものは作り直さない）。
             //    作り直しは、確認済みを除く指定なら確認済みを残す。
             switch job {

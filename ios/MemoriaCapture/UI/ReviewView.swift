@@ -35,7 +35,8 @@ struct ReviewView: View {
                                         model.open(.photo(sessionId: sessionId, photoId: photo.photoId))
                                     } label: {
                                         PhotoCell(photo: photo, session: session, issues: readiness?.issues(for: photo.photoId) ?? [],
-                                                  url: model.store.photoURL(sessionId, photoId: photo.photoId))
+                                                  url: thumbnailURL(photo, session: session),
+                                                  rotation: session.isFlat && photo.flat?.rectified != nil ? 0 : nil)
                                     }
                                     .buttonStyle(.plain)
                                 }
@@ -65,8 +66,10 @@ struct ReviewView: View {
                         editingTitle = true
                     }
                     .disabled(model.isLocked(sessionId))
-                    Button("切り抜きを作り直す") { confirmRegenerate = true }
-                        .disabled(model.isLocked(sessionId) || regenerateTargets.isEmpty)
+                    if session?.isFlat != true {
+                        Button("切り抜きを作り直す") { confirmRegenerate = true }
+                            .disabled(model.isLocked(sessionId) || regenerateTargets.isEmpty)
+                    }
                     Button("置き換え済みを削除", role: .destructive) { confirmDeleteSuperseded = true }
                         .disabled(model.isLocked(sessionId) || (readiness?.supersededPhotoIds.isEmpty ?? true))
                 } label: {
@@ -77,7 +80,7 @@ struct ReviewView: View {
                 Button {
                     model.replaceTop(with: .capture(sessionId: sessionId, preferredTargetId: nil))
                 } label: {
-                    Label("追加撮影", systemImage: "camera")
+                    Label(session?.isFlat == true ? "撮り直す" : "追加撮影", systemImage: "camera")
                 }
                 .disabled(model.isLocked(sessionId))
                 Spacer()
@@ -137,14 +140,26 @@ struct ReviewView: View {
             .map(\.photoId)
     }
 
+    /// 一覧の縮小画像：平面の作品は遠近を直した画像（あれば）、ほかは元の写真。
+    private func thumbnailURL(_ photo: Photo, session: CaptureSession) -> URL {
+        if session.isFlat, photo.flat?.rectified != nil { return model.store.rectifiedURL(sessionId, photoId: photo.photoId) }
+        return model.store.photoURL(sessionId, photoId: photo.photoId)
+    }
+
     private func summary(_ session: CaptureSession) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("\(session.photos.count) 枚・切り抜き \(session.photos.filter { $0.mask.status.hasFile }.count) 枚")
-                .font(.headline)
+            if session.isFlat {
+                Text("平面の作品・\(session.photos.count) 枚").font(.headline)
+            } else {
+                Text("\(session.photos.count) 枚・切り抜き \(session.photos.filter { $0.mask.status.hasFile }.count) 枚")
+                    .font(.headline)
+            }
             if let readiness {
                 ReadinessView(readiness: readiness)
             }
-            Text("✓ は方向が確定した写真、「参考」は方向が参考値の写真です。「前の基準」は基準を設定し直す前に撮った写真です。「置き換え済み」は同じ方向をあとで撮り直した写真です。")
+            Text(session.isFlat
+                 ? "✓ は真上から撮った写真です。紙が見つかった写真は、遠近を直した画像を出しています。「置き換え済み」は撮り直す前の写真です（送ると Mac では一番新しい真上の写真を使います）。"
+                 : "✓ は方向が確定した写真、「参考」は方向が参考値の写真です。「前の基準」は基準を設定し直す前に撮った写真です。「置き換え済み」は同じ方向をあとで撮り直した写真です。")
                 .font(.caption).foregroundStyle(.secondary)
         }
     }
@@ -157,7 +172,11 @@ struct ReadinessView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Label {
-                Text(readiness.referenceFrameId == nil ? "基準を設定して撮った写真がありません" : "最後の基準（\(readiness.referenceFrameId!)）：\(readiness.directionSummary)")
+                if readiness.isFlat {
+                    Text(readiness.directionSummary)
+                } else {
+                    Text(readiness.referenceFrameId == nil ? "基準を設定して撮った写真がありません" : "最後の基準（\(readiness.referenceFrameId!)）：\(readiness.directionSummary)")
+                }
             } icon: {
                 Image(systemName: readiness.isComplete ? "checkmark.seal.fill" : "exclamationmark.circle.fill")
                     .foregroundStyle(readiness.isComplete ? .green : .orange)
@@ -172,7 +191,9 @@ struct ReadinessView: View {
                     .font(.subheadline).foregroundStyle(.secondary)
             }
             if !readiness.isComplete || readiness.attentionCount > 0 {
-                Text("このままでも送れますが、3D にするには、すべての方向に切り抜きのよい写真があるのが理想です。")
+                Text(readiness.isFlat
+                     ? "このままでも送れますが、紙の全体が真上から写っていて、紙が見つかった写真が理想です。"
+                     : "このままでも送れますが、3D にするには、すべての方向に切り抜きのよい写真があるのが理想です。")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
@@ -228,10 +249,12 @@ struct PhotoCell: View {
     let session: CaptureSession
     var issues: [PhotoIssue] = []
     let url: URL
+    /// 縮小画像を回す角度（nil なら写真の `displayRotationDegClockwise`。遠近を直した画像はすでにまっすぐなので 0）。
+    var rotation: Int?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            PhotoThumbnail(url: url, rotation: photo.image.displayRotationDegClockwise, maxPixel: 300)
+            PhotoThumbnail(url: url, rotation: rotation ?? photo.image.displayRotationDegClockwise, maxPixel: 300)
                 .frame(height: 130)
                 .frame(maxWidth: .infinity)
                 .clipped()
@@ -250,7 +273,11 @@ struct PhotoCell: View {
                     }
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    MaskBadge(status: photo.mask.status, check: photo.mask.check?.status).padding(4)
+                    if session.isFlat {
+                        FlatBadge(flat: photo.flat).padding(4)
+                    } else {
+                        MaskBadge(status: photo.mask.status, check: photo.mask.check?.status).padding(4)
+                    }
                 }
                 .overlay(alignment: .bottomLeading) {
                     if issues.contains(.superseded) {
@@ -262,7 +289,13 @@ struct PhotoCell: View {
                 }
                 .opacity(issues.contains(.superseded) ? 0.6 : 1)
             HStack(spacing: 4) {
-                if photo.direction.confirmed && isLatestReference {
+                if session.isFlat {
+                    if photo.direction.targetId != nil {
+                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    } else {
+                        Text("真上ではない").foregroundStyle(.orange)
+                    }
+                } else if photo.direction.confirmed && isLatestReference {
                     Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                 } else if photo.direction.confirmed {
                     Text("前の基準").foregroundStyle(.secondary)
@@ -293,6 +326,38 @@ struct PhotoCell: View {
     private var hasQualityWarning: Bool {
         if let saved = photo.quality.saved, saved.brightness != .ok || saved.blur != .ok { return true }
         return photo.quality.live.warningsAcknowledged
+    }
+}
+
+/// 平面の作品の写真の印：遠近を直した（緑）・紙は見つかったが直していない（青）・紙が見つからない（橙）。端にかかっていれば橙。
+struct FlatBadge: View {
+    let flat: FlatPhotoInfo?
+
+    var body: some View {
+        Label(text, systemImage: icon)
+            .labelStyle(.iconOnly)
+            .font(.caption2.bold())
+            .padding(5)
+            .background(color, in: Circle())
+            .foregroundStyle(.white)
+            .accessibilityLabel(text)
+    }
+
+    private var text: String {
+        guard flat?.corners != nil else { return "紙が見つからない" }
+        if flat?.sheetAtFrameEdge == true { return "紙が端で切れているかも" }
+        return flat?.rectified != nil ? "遠近を直した画像" : "紙は見つかった（直した画像なし）"
+    }
+
+    private var icon: String {
+        guard flat?.corners != nil else { return "questionmark" }
+        if flat?.sheetAtFrameEdge == true { return "exclamationmark" }
+        return flat?.rectified != nil ? "crop" : "rectangle"
+    }
+
+    private var color: Color {
+        guard flat?.corners != nil, flat?.sheetAtFrameEdge != true else { return .orange }
+        return flat?.rectified != nil ? .green : .blue
     }
 }
 

@@ -32,6 +32,15 @@ struct PhotoDetailView: View {
     private var maskBusy: Bool { photo?.mask.status == .processing || model.masks.pendingPhotoIds().contains(photoId) }
 
     var body: some View {
+        // 平面の作品の写真は、マスクの代わりに紙の四隅と遠近を直した画像を見せる。
+        if model.loadSession(sessionId)?.isFlat == true {
+            FlatPhotoDetailView(sessionId: sessionId, photoId: photoId)
+        } else {
+            objectBody
+        }
+    }
+
+    private var objectBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 Picker("表示", selection: $mode) {

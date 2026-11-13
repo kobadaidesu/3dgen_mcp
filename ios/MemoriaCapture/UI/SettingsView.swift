@@ -89,7 +89,7 @@ struct SettingsView: View {
 
             Section {
                 Picker("撮る方向", selection: $settings.planPreset) {
-                    ForEach(DirectionPlanPreset.allCases) { preset in
+                    ForEach(DirectionPlanPreset.objectPresets) { preset in
                         VStack(alignment: .leading, spacing: 2) {
                             Text(preset.displayName)
                             Text(preset.summary).font(.caption).foregroundStyle(.secondary)
@@ -102,7 +102,7 @@ struct SettingsView: View {
             } header: {
                 Text("撮る方向")
             } footer: {
-                Text("新しく作るセッションから使われます。今あるセッションは、作ったときの方向のままです。")
+                Text("立体の作品の新しいセッションから使われます。今あるセッションは、作ったときの方向のままです。平面の作品は、いつも真上から 1 枚です。")
             }
 
             Section {

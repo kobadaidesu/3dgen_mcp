@@ -6,7 +6,8 @@ struct SessionListView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var settings: AppSettings
     @State private var showingNew = false
-    @State private var newTitle = ""
+    /// 「撮影を始める」を押した内容（シートを閉じてから撮影画面を開く）。
+    @State private var pendingNew: (title: String, kind: WorkKind)?
     @State private var pendingDelete: SessionSummary?
 
     var body: some View {
@@ -24,7 +25,7 @@ struct SessionListView: View {
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("まだ撮影がありません").font(.headline)
-                        Text("「新しく撮る」から作品名を入れて、作品のまわりを撮影します。作品は動かないように置いてください。")
+                        Text("「新しく撮る」から作品名と作品の種類（立体・平面）を選んで撮影します。作品は動かないように置いてください。")
                             .font(.subheadline).foregroundStyle(.secondary)
                     }
                     .padding(.vertical, 8)
@@ -61,7 +62,6 @@ struct SessionListView: View {
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    newTitle = ""
                     showingNew = true
                 } label: {
                     Label("新しく撮る", systemImage: "plus")
@@ -70,16 +70,11 @@ struct SessionListView: View {
         }
         .refreshable { model.reloadSessions() }
         .onAppear { model.reloadSessions() }
-        .alert("新しく撮る", isPresented: $showingNew) {
-            TextField("作品名（例：ねこの貯金箱）", text: $newTitle)
-            Button("撮影を始める") {
-                if let session = model.createSession(title: newTitle) {
-                    model.open(.capture(sessionId: session.sessionId, preferredTargetId: nil))
-                }
+        .sheet(isPresented: $showingNew, onDismiss: startPendingSession) {
+            NewSessionSheet { title, kind in
+                pendingNew = (title, kind)
+                showingNew = false
             }
-            Button("やめる", role: .cancel) {}
-        } message: {
-            Text("作品名は空でもかまいません。")
         }
         .confirmationDialog("このセッションを削除しますか？", isPresented: Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } }), titleVisibility: .visible) {
             Button("削除", role: .destructive) {
@@ -88,6 +83,16 @@ struct SessionListView: View {
             }
         } message: {
             Text("写真とマスクがこの iPhone から消えます。Mac へ送ったものは残ります。")
+        }
+    }
+}
+
+extension SessionListView {
+    private func startPendingSession() {
+        guard let pending = pendingNew else { return }
+        pendingNew = nil
+        if let session = model.createSession(title: pending.title, workKind: pending.kind) {
+            model.open(.capture(sessionId: session.sessionId, preferredTargetId: nil))
         }
     }
 }
@@ -114,12 +119,19 @@ struct SessionRow: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text(summary.title.isEmpty ? "（名前なし）" : summary.title).font(.headline)
                 HStack(spacing: 10) {
+                    Label(summary.workKind == .flat ? "平面" : "立体", systemImage: summary.workKind == .flat ? "doc.richtext" : "cube")
                     Label("\(summary.photoCount) 枚", systemImage: "photo")
-                    Label("方向 \(summary.confirmedDirections)/\(summary.totalDirections)", systemImage: "circle.dashed")
+                    if summary.workKind == .flat {
+                        Label("真上 \(summary.confirmedDirections)/\(summary.totalDirections)", systemImage: "arrow.down.to.line")
+                    } else {
+                        Label("方向 \(summary.confirmedDirections)/\(summary.totalDirections)", systemImage: "circle.dashed")
+                    }
                 }
                 .font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 10) {
-                    Text(maskText).font(.caption).foregroundStyle(.secondary)
+                    if summary.workKind != .flat {
+                        Text(maskText).font(.caption).foregroundStyle(.secondary)
+                    }
                     TransferBadge(status: summary.transferStatus)
                 }
             }
@@ -133,6 +145,64 @@ struct SessionRow: View {
         var text = "切り抜き \(summary.maskReady)/\(summary.photoCount)"
         if summary.maskProcessing > 0 { text += "（作成中 \(summary.maskProcessing)）" }
         return text
+    }
+}
+
+/// 新しいセッション：作品名と、作品の種類（立体・平面）を選ぶ。種類で撮り方が変わる（自動では見分けない）。
+struct NewSessionSheet: View {
+    let onStart: (String, WorkKind) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var title = ""
+    @State private var kind: WorkKind = .object
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("作品名（例：ねこの貯金箱）", text: $title)
+                } header: {
+                    Text("作品名")
+                } footer: {
+                    Text("空でもかまいません。AI が何の作品かを知る手がかりになります。")
+                }
+                Section {
+                    ForEach(WorkKind.allCases) { option in
+                        Button {
+                            kind = option
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: kind == option ? "checkmark.circle.fill" : "circle")
+                                    .font(.title2)
+                                    .foregroundStyle(kind == option ? Color.accentColor : Color.secondary)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(option.displayName).font(.headline)
+                                    Text(option.summary).font(.subheadline)
+                                    Text("例：\(option.hint)").font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                        .foregroundStyle(.primary)
+                        .accessibilityAddTraits(kind == option ? .isSelected : [])
+                    }
+                } header: {
+                    Text("どんな作品ですか")
+                } footer: {
+                    Text("迷ったら：机に置いて真横から見たとき、形が見えるなら立体、ほぼ紙の厚みだけなら平面です。紙に毛糸などを貼った絵は、どちらにしてもかまいません。")
+                }
+            }
+            .navigationTitle("新しく撮る")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("やめる") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("撮影を始める") { onStart(title, kind) }
+                }
+            }
+        }
     }
 }
 
