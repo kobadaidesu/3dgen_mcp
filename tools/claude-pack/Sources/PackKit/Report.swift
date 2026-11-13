@@ -3,7 +3,7 @@ import CaptureCore
 
 public enum PackInfo {
     public static let toolName = "memoria-pack"
-    public static let toolVersion = "0.2.0"
+    public static let toolVersion = "0.3.0"
 }
 
 public struct Size3: Codable, Equatable, Sendable {
@@ -55,13 +55,31 @@ public struct Measurements: Codable, Sendable {
         public var voxelSizeM: Double
     }
 
+    /// The flat artwork's sheet (`workKind` "flat"): the paper measured by projecting its four corners onto an ARKit plane.
+    public struct Sheet: Codable, Equatable, Sendable {
+        /// Horizontal side of `views/artwork.jpg` (the rectified picture), metres.
+        public var widthM: Double
+        /// Vertical side of `views/artwork.jpg`, metres.
+        public var heightM: Double
+        public var widthCm: Double
+        public var heightCm: Double
+        /// "existingPlaneGeometry" | "estimatedPlane" (the ARKit plane the corners were projected onto).
+        public var planeSource: String
+        public var photoId: String
+    }
+
     public var schema = "memoria.claude-pack.measurements"
     public var schemaVersion = 1
     public var sessionId: String
+    /// "object" (3D work: hull / cylinder) | "flat" (flat artwork: `sheet`, no 3D size). Missing in packages before 0.3.0.
+    public var workKind: String? = "object"
+    /// Flat artwork only: the sheet size, or null when it could not be measured. `sizeCm`/`sizeM` stay null for flat artwork.
+    @NullCodable public var sheet: Sheet?
     /// "ok" (visual hull) | "approximate" (too few silhouettes: `sizeCm` is the user-fitted cylinder, see `method`) | "unavailable"
     public var status: String
     @NullCodable public var unavailableReason: String?
     /// "visualHull" | "userCylinder" (the cylinder fitted with the AR guide during capture, not a measurement)
+    /// | "flatSheetCorners" (flat artwork: the sheet's corners projected onto an ARKit plane; see `sheet`)
     public var method = "visualHull"
     public var frame: [String: String] = [
         "units": "metres (sizeCm in centimetres)",
@@ -155,8 +173,25 @@ public struct PackIndex: Codable, Sendable {
         public var reasons: [String]
     }
 
+    /// Flat artwork: where the picture came from (the photo, its corners, the rectified image in the session folder).
+    public struct FlatSource: Codable, Equatable, Sendable {
+        @NullCodable public var photoId: String?
+        @NullCodable public var sequence: Int?
+        /// The sheet's corners in the stored photo (pixels; topLeft… as seen upright). null when no sheet was found.
+        @NullCodable public var corners: FlatQuad?
+        @NullCodable public var sheetAtFrameEdge: Bool?
+        /// The full-resolution rectified image in the session folder (`rectified/<photoId>.jpg`), if the app made one.
+        @NullCodable public var rectifiedInSession: String?
+        /// "rectified" (views/artwork.jpg is the perspective-corrected sheet) | "uprightPhoto" (no rectified image: the photo turned upright) | "none".
+        public var artworkSource: String
+        /// Lean of the camera from straight down: `90 − elevationDeg` (degrees). null without a photo.
+        @NullCodable public var cameraTiltFromVerticalDeg: Double?
+    }
+
     public var schema = "memoria.claude-pack"
     public var schemaVersion = 1
+    /// "object" | "flat". Missing in packages before 0.3.0 (they are all "object").
+    public var workKind: String?
     public var provenance: Provenance
     public var title: String
     public var views: [ViewChoice]
@@ -164,4 +199,6 @@ public struct PackIndex: Codable, Sendable {
     public var maskIssues: [MaskIssue]
     public var files: [String]
     public var timingsS: [String: Double]
+    /// Flat artwork only.
+    public var flat: FlatSource?
 }

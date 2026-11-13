@@ -607,6 +607,103 @@ class TransferTests(ReceiverTestCase):
         self.assertIn("photos/%s.jpg" % cap.photos[0][0], text)
 
 
+def make_flat_capture(rectified=True, corners=True, size=True):
+    """A flat-artwork session (workKind flat, plan flat1): one overhead photo, no mask, optional rectified image."""
+    pid = new_id()
+    cap = Capture(photos=[(pid, 90, "notGenerated")], title="えのぐの絵")
+    flat = {
+        "corners": {"topLeft": [100, 120], "topRight": [900, 110], "bottomRight": [910, 700], "bottomLeft": [95, 690]}
+        if corners else None,
+        "cornersMethod": "VNDetectRectanglesRequest" if corners else None,
+        "cornersConfidence": 0.97 if corners else None,
+        "sheetAtFrameEdge": False if corners else None,
+        "size": {"widthM": 0.297, "heightM": 0.21, "planeSource": "estimatedPlane"} if size else None,
+        "rectified": {"file": "rectified/%s.jpg" % pid, "width": 2970, "height": 2100} if rectified else None,
+    }
+    cap.session["workKind"] = "flat"
+    cap.session["directionPlan"] = {"id": "flat1", "targets": [{"id": "top-e90", "azimuthDeg": 0, "elevationDeg": 90,
+                                                               "azimuthToleranceDeg": 180, "elevationToleranceDeg": 20,
+                                                               "anyAzimuth": True}]}
+    cap.session["photos"][0]["referenceFrameId"] = None
+    cap.session["photos"][0]["direction"] = {"confirmed": True, "targetId": "top-e90", "azimuthDeg": None, "elevationDeg": 86.5}
+    cap.session["photos"][0]["flat"] = flat
+    if rectified:
+        cap.files["rectified/%s.jpg" % pid] = b"\xff\xd8rectified\xff\xd9"
+    cap.set_session(cap.session)
+    return cap, pid
+
+
+class FlatSessionTests(ReceiverTestCase):
+    def test_flat_session_with_rectified_image(self):
+        cap, pid = make_flat_capture()
+        self.send(cap)
+        folder = self.published(cap)
+        self.assertEqual((folder / "rectified" / ("%s.jpg" % pid)).read_bytes(), cap.files["rectified/%s.jpg" % pid])
+        [entry] = self.index()
+        self.assertEqual(entry["workKind"], "flat")
+        self.assertEqual(entry["maskCount"], {"notGenerated": 1})
+
+    def test_flat_session_without_sheet(self):
+        cap, _ = make_flat_capture(rectified=False, corners=False, size=False)
+        self.send(cap)
+        self.assertEqual(self.index()[0]["workKind"], "flat")
+
+    def test_object_session_without_work_kind_is_object(self):
+        cap = Capture()
+        self.send(cap)
+        self.assertEqual(self.index()[0]["workKind"], "object")
+
+    def test_invalid_flat_fields(self):
+        def rectified_not_in_manifest(cap, pid):
+            del cap.files["rectified/%s.jpg" % pid]
+
+        def rectified_wrong_path(cap, pid):
+            cap.session["photos"][0]["flat"]["rectified"]["file"] = "photos/%s.jpg" % pid
+
+        def bad_corners(cap, pid):
+            cap.session["photos"][0]["flat"]["corners"] = {"topLeft": [1, 2]}
+
+        def bad_size(cap, pid):
+            cap.session["photos"][0]["flat"]["size"] = {"widthM": -1, "heightM": 0.2, "planeSource": "x"}
+
+        def unknown_work_kind(cap, pid):
+            cap.session["workKind"] = "sculpture"
+
+        def flat_not_object(cap, pid):
+            cap.session["photos"][0]["flat"] = "yes"
+
+        for mutate in (rectified_not_in_manifest, rectified_wrong_path, bad_corners, bad_size, unknown_work_kind,
+                       flat_not_object):
+            with self.subTest(mutate.__name__):
+                cap, pid = make_flat_capture()
+                mutate(cap, pid)
+                cap.set_session(cap.session)
+                upload_id = self.upload_all(cap)
+                status, body = self.commit(cap, upload_id)
+                self.assertEqual((status, body["status"]), (422, "invalid"), body)
+                self.assertFalse(self.published(cap).exists())
+
+    def test_rectified_path_is_allowed_only_for_uuids(self):
+        cap, _ = make_flat_capture()
+        manifest = cap.manifest()
+        manifest["files"].append({"path": "rectified/../x.jpg", "size": 1, "sha256": "0" * 64})
+        status, body = self.post_manifest(cap, manifest)
+        self.assertEqual(status, 400, body)
+
+    def test_list_and_show_flat(self):
+        cap, pid = make_flat_capture()
+        self.send(cap)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(mr.main(["list", "--data-dir", str(self.data_dir)]), 0)
+            self.assertEqual(mr.main(["show", cap.sid[:8], "--data-dir", str(self.data_dir)]), 0)
+        text = out.getvalue()
+        self.assertIn("平面", text)
+        self.assertIn("workKind flat", text)
+        self.assertIn("29.7 × 21.0 cm", text)
+        self.assertIn("rectified/%s.jpg" % pid, text)
+
+
 class DisconnectLogTests(ReceiverTestCase):
     def _handle_error(self, error):
         out, err = io.StringIO(), io.StringIO()

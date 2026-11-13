@@ -155,6 +155,87 @@ class CoreTestBase(unittest.TestCase):
         self.assertNotIn(PARTIAL, text)
 
 
+FLAT = "EEEE6666-0000-4000-8000-000000000006"  # flat artwork (workKind flat, plan flat1), pack without overview
+
+
+class FlatTests(CoreTestBase):
+    """A flat-artwork session added on top of the base fixtures (snapshot retaken so tearDown still guards sessions/)."""
+
+    def setUp(self):
+        super().setUp()
+        pid = ids(1, "A0000006")[0]
+        p = photo(pid, 1, None, 86.5, "top-e90")
+        p["referenceFrameId"] = None
+        p["mask"] = {"status": "notGenerated", "file": None, "check": None}
+        p["flat"] = {"corners": {"topLeft": [10, 20], "topRight": [30, 20], "bottomRight": [30, 40], "bottomLeft": [10, 40]},
+                     "sheetAtFrameEdge": False, "size": {"widthM": 0.297, "heightM": 0.21, "planeSource": "estimatedPlane"},
+                     "rectified": {"file": "rectified/%s.jpg" % pid, "width": 2970, "height": 2100}}
+        make_session(self.root, FLAT, "flat1", [p], "2026-11-12T09:00:00+09:00")
+        folder = self.root / "sessions" / FLAT
+        session = json.loads((folder / "session.json").read_text("utf-8"))
+        session["workKind"] = "flat"
+        session["referenceFrames"] = []
+        write(folder / "session.json", session)
+        (folder / "masks" / ("%s.png" % pid)).unlink()
+        write(folder / "rectified" / ("%s.jpg" % pid), fake_jpeg(2970, 2100))
+        artwork = view("artwork", pid, None, 86.5)
+        artwork["cropSource"] = "rectified"
+        whole = view("photo", pid, None, 86.5)
+        pack = make_pack(self.root, FLAT, [artwork, whole])
+        (pack / "overview.jpg").unlink()
+        index = json.loads((pack / "pack.json").read_text("utf-8"))
+        index["workKind"] = "flat"
+        index["flat"] = {"photoId": pid, "artworkSource": "rectified", "rectifiedInSession": "rectified/%s.jpg" % pid}
+        write(pack / "pack.json", index)
+        write(pack / "measurements.json", {"workKind": "flat", "status": "ok", "method": "flatSheetCorners", "sizeCm": None,
+                                           "sheet": {"widthCm": 29.7, "heightCm": 21.0}})
+        self.pid = pid
+        self.sessions_snapshot = self.snapshot(self.root / "sessions")
+
+    def test_list_and_latest_show_work_kind(self):
+        kinds = {s["sessionId"]: s["workKind"] for s in core.list_sessions(self.root)["sessions"]}
+        self.assertEqual(kinds[FLAT], "flat")
+        self.assertEqual(kinds[AI5], "object")  # no workKind in session.json: object
+        self.assertEqual(kinds[NOPACK], "object")
+        latest = core.latest_session(self.root, "2026-11-12T08:00:00+09:00")
+        self.assertEqual(latest["session"]["sessionId"], AI5)
+        flat = next(s for s in core.list_sessions(self.root)["sessions"] if s["sessionId"] == FLAT)
+        self.assertEqual(flat["capturePlan"], "flat1")
+
+    def test_flat_brief_and_views(self):
+        brief = core.get_brief(self.root, "EEEE")
+        self.assertEqual(brief["workKind"], "flat")
+        self.assertEqual([v["name"] for v in brief["views"]], ["artwork", "photo"])
+        self.assertIsNone(brief["overview"])
+        self.assertIsNone(brief["hullObjPath"])
+        self.assertEqual(brief["measurements"]["sheet"]["widthCm"], 29.7)
+        self.assertEqual(brief["flat"]["artworkSource"], "rectified")
+        self.assertIn("no 3D reconstruction", brief["next"])
+        self.assertIsNone(brief["views"][0]["direction"]["azimuthDeg"])
+        path, entry = core.resolve_view(self.root, FLAT, "artwork")
+        self.assertEqual(path.name, "artwork.jpg")
+        self.assertEqual(entry["kind"], "photo")
+        data, fmt, info = core.load_image(path, 1568)
+        self.assertEqual((fmt, info["width"], info["height"]), ("jpeg", 800, 600))
+        with self.assertRaises(core.MemoriaError) as ctx:
+            core.resolve_view(self.root, FLAT, "overview")
+        self.assertIn("no overview.jpg", str(ctx.exception))
+        self.assertNoSecrets(brief)
+
+    def test_object_brief_reports_object(self):
+        self.assertEqual(core.get_brief(self.root, AI5)["workKind"], "object")
+        self.assertNotIn("flat", core.get_brief(self.root, AI5))
+
+    def test_flat_original_photos(self):
+        result = core.get_original_photos(self.root, FLAT)
+        self.assertEqual(result["workKind"], "flat")
+        [p] = result["photos"]
+        self.assertEqual(p["flat"]["rectified"], "rectified/%s.jpg" % self.pid)
+        self.assertEqual(p["flat"]["size"]["widthM"], 0.297)
+        self.assertIsNone(p["mask"])
+        self.assertIsNone(core.get_original_photos(self.root, AI5)["photos"][0]["flat"])
+
+
 class SessionTests(CoreTestBase):
     def test_list_sessions_newest_first_and_only_complete(self):
         result = core.list_sessions(self.root)

@@ -164,6 +164,7 @@ public final class PackBuilder {
     }
 
     func write(into dir: URL, started: Date) throws -> String {
+        if session.isFlat { return try writeFlat(into: dir, started: started) }
         let selection = timed("selectViews") { ViewSelector.select(session: session, maskFileExists: maskExists) }
         var choices = selection.choices
         var tiles: [Overview.Tile] = []
@@ -184,10 +185,7 @@ public final class PackBuilder {
         let coverage = coverageInfo(referenceFrameId: selection.referenceFrameId, choices: choices)
         let maskIssues = maskIssueList()
         let now = Date()
-        let provenance = PackIndex.Provenance(
-            sessionId: session.sessionId, manifestHash: located.receipt?.manifestHash, receivedAt: located.receipt?.receivedAt,
-            generatedAt: ISODate.string(now, timeZone: TimeZone(identifier: "UTC")!),
-            tool: PackInfo.toolName, toolVersion: PackInfo.toolVersion, sourceFolder: located.folder.path, cutouts: writeCutouts)
+        let provenance = makeProvenance(now: now)
         var files = ["brief.md", "overview.jpg", "measurements.json", "pack.json"]
         if measurements.mesh != nil { files.append("hull.obj") }
         files += choices.flatMap { [$0.file, $0.cutoutFile].compactMap { $0 } }
@@ -199,8 +197,8 @@ public final class PackBuilder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(measurements).write(to: dir.appendingPathComponent("measurements.json"))
-        let index = PackIndex(provenance: provenance, title: session.title, views: choices, coverage: coverage,
-                              maskIssues: maskIssues, files: files, timingsS: timings)
+        let index = PackIndex(workKind: session.workKind.rawValue, provenance: provenance, title: session.title, views: choices,
+                              coverage: coverage, maskIssues: maskIssues, files: files, timingsS: timings)
         try encoder.encode(index).write(to: dir.appendingPathComponent("pack.json"))
 
         let shown = choices.filter { !$0.isMissing }.count
@@ -210,6 +208,13 @@ public final class PackBuilder {
             ?? "size unavailable (\(measurements.unavailableReason ?? "?"))"
         return String(format: "[pack] %@: %d/%d views, %@, %d hull views, %.1fs", session.sessionId, shown, choices.count, size,
                       measurements.viewsUsed, timings["total"] ?? 0)
+    }
+
+    func makeProvenance(now: Date) -> PackIndex.Provenance {
+        PackIndex.Provenance(
+            sessionId: session.sessionId, manifestHash: located.receipt?.manifestHash, receivedAt: located.receipt?.receivedAt,
+            generatedAt: ISODate.string(now, timeZone: TimeZone(identifier: "UTC")!),
+            tool: PackInfo.toolName, toolVersion: PackInfo.toolVersion, sourceFolder: located.folder.path, cutouts: writeCutouts)
     }
 
     // MARK: Views

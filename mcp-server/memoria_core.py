@@ -33,6 +33,7 @@ SIPS_PATH = "/usr/bin/sips"
 
 SESSION_ID_RE = re.compile(r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}")
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
+WORK_KINDS = ("object", "flat")  # session.json "workKind": missing or null means "object" (sessions from before it)
 LABEL_MAX = 64
 
 
@@ -146,6 +147,12 @@ def _sort_key(folder: Path):
     return (t.timestamp() if t else float("-inf"), folder.name)
 
 
+def work_kind(session) -> str:
+    """"object" (3D work: craft, clay) or "flat" (flat artwork: drawings, collages shot once from above)."""
+    kind = session.get("workKind") if isinstance(session, dict) else None
+    return kind if kind in WORK_KINDS else "object"
+
+
 def session_summary(root: Path, folder: Path) -> dict:
     sid = folder.name
     session = read_json(folder / "session.json")
@@ -157,6 +164,7 @@ def session_summary(root: Path, folder: Path) -> dict:
     return {
         "sessionId": sid,
         "title": session.get("title") or "",
+        "workKind": work_kind(session),
         "capturePlan": plan.get("id"),
         "photoCount": len(photos),
         "receivedAt": _received_at(folder),
@@ -328,9 +336,11 @@ def get_brief(root: Path, session: str) -> dict:
     overview = _view_entry(pack, "overview", "overview.jpg", "overview", None)
     hull = pack / "hull.obj"
     provenance = index.get("provenance") if isinstance(index.get("provenance"), dict) else {}
-    return {
+    kind = index.get("workKind") if index.get("workKind") in WORK_KINDS else work_kind(read_json(folder / "session.json"))
+    result = {
         "sessionId": folder.name,
         "title": index.get("title") if isinstance(index.get("title"), str) else "",
+        "workKind": kind,
         "packDir": str(pack.resolve()),
         "briefPath": str((pack / "brief.md").resolve()),
         "brief": (pack / "brief.md").read_text(encoding="utf-8", errors="replace"),
@@ -346,6 +356,13 @@ def get_brief(root: Path, session: str) -> dict:
         "next": "Look at the overview and views with get_view (view=<name> or 'overview'); originals are listed by "
                 "get_original_photos; write results to the folder from output_dir.",
     }
+    if kind == "flat":
+        result["flat"] = index.get("flat") if isinstance(index.get("flat"), dict) else None
+        result["next"] = ("Flat artwork (a drawing or collage shot once from straight above): no 3D reconstruction is "
+                          "needed. Look at the picture with get_view(view='artwork'); put it on a thin panel or frame of "
+                          "the measured size (measurements.sheet, null when unknown); write results to the folder from "
+                          "output_dir.")
+    return result
 
 
 def resolve_view(root: Path, session: str, view: str) -> "tuple[Path, dict]":
@@ -431,6 +448,7 @@ def get_original_photos(root: Path, session: str) -> dict:
             return rel if (folder / rel).is_file() else None
 
         photo_file = existing("photos/%s.jpg" % pid)
+        flat = p.get("flat") if isinstance(p.get("flat"), dict) else None
         photos.append({
             "photoId": pid,
             "sequence": p.get("sequence"),
@@ -449,6 +467,8 @@ def get_original_photos(root: Path, session: str) -> dict:
             "maskStatus": mask.get("status"),
             "maskCheck": check.get("status"),
             "usedInPackAs": used_in_pack.get(pid),
+            "flat": {"corners": flat.get("corners"), "sheetAtFrameEdge": flat.get("sheetAtFrameEdge"),
+                     "size": flat.get("size"), "rectified": existing("rectified/%s.jpg" % pid)} if flat else None,
         })
     frames = []
     for f in data.get("referenceFrames", []) if isinstance(data.get("referenceFrames"), list) else []:
@@ -461,6 +481,7 @@ def get_original_photos(root: Path, session: str) -> dict:
         "title": data.get("title") or "",
         "sessionDir": str(folder),
         "sessionJsonPath": str(folder / "session.json"),
+        "workKind": work_kind(data),
         "capturePlan": plan.get("id"),
         "photoCount": len(photos),
         "notes": [
@@ -470,6 +491,8 @@ def get_original_photos(root: Path, session: str) -> dict:
             "camera.intrinsics (K, row-major, pixels) and camera.cameraToWorld (ARKit, row-major, camera +X right, "
             "+Y up, -Z forward) apply to the unrotated photos/ image. Poses are comparable only within one "
             "referenceFrameId; objectToWorld of that frame gives the object frame (+Y up, +Z towards the front camera).",
+            "Flat artwork (workKind flat): no masks; flat.corners are the sheet's corners in the photo (pixels), "
+            "flat.size the measured sheet (null when unknown), flat.rectified the perspective-corrected image.",
             "Full conventions: docs/data-format.md and captures/README.md.",
         ],
         "referenceFrames": frames,

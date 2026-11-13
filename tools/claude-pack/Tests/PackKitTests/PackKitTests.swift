@@ -543,4 +543,145 @@ final class PackKitTests: XCTestCase {
         XCTAssertNotEqual(cut.alphaInfo, .noneSkipLast)
         XCTAssertTrue(try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8).contains("_cutout.png"))
     }
+
+    // MARK: - flat artwork (workKind flat, plan flat1)
+
+    func flatPhoto(_ seq: Int, el: Double = 86, rectified: Bool, corners: Bool = true, size: Bool = true, W: Int = 64, H: Int = 48) -> Photo {
+        var p = photo(seq, az: 0, el: el, frame: nil, target: el >= 70 ? "top-e90" : nil, mask: .notGenerated)
+        p.direction.azimuthDeg = nil
+        p.image.width = W
+        p.image.height = H
+        p.camera.intrinsicsResolution = PixelSize(width: W, height: H)
+        p.mask = .notGenerated
+        let quad = FlatQuad(topLeft: PixelPoint(x: 8, y: 40), topRight: PixelPoint(x: 8, y: 6),
+                            bottomRight: PixelPoint(x: 56, y: 6), bottomLeft: PixelPoint(x: 56, y: 40))
+        p.flat = FlatPhotoInfo(
+            corners: corners ? quad : nil, cornersMethod: corners ? FlatPhotoInfo.visionMethod : nil, cornersConfidence: corners ? 0.95 : nil,
+            sheetAtFrameEdge: corners ? false : nil,
+            size: size && corners ? FlatSheetSize(widthM: 0.21, heightM: 0.297, planeSource: "estimatedPlane") : nil,
+            rectified: rectified ? FlatRectifiedImage(file: Photo.rectifiedPath(photoId: Self.pid(seq)), width: 34, height: 48) : nil)
+        return p
+    }
+
+    func flatSession(_ photos: [Photo]) -> CaptureSession {
+        var s = CaptureSession(sessionId: "S", title: "えのぐの絵", createdAt: Date(timeIntervalSince1970: 0),
+                               device: DeviceInfo(model: "", systemName: "iOS", systemVersion: "", appVersion: "", appBuild: ""),
+                               directionPlan: DirectionPlanPreset.flat1.plan, workKind: .flat)
+        s.photos = photos
+        return s
+    }
+
+    func testFlatPhotoChoicePrefersTheLatestOverheadShot() {
+        let s = flatSession([flatPhoto(1, rectified: true), flatPhoto(2, rectified: true), flatPhoto(3, el: 50, rectified: true)])
+        // #1 is superseded by #2; #3 was not shot from above.
+        XCTAssertEqual(PackBuilder.chooseFlatPhoto(session: s)?.photoId, Self.pid(2))
+        XCTAssertEqual(PackBuilder.chooseFlatPhoto(session: flatSession([flatPhoto(1, el: 50, rectified: true)]))?.photoId, Self.pid(1))
+        XCTAssertNil(PackBuilder.chooseFlatPhoto(session: flatSession([])))
+    }
+
+    func writeFlatSession(_ photos: [Photo], root: URL) throws -> LocatedSession {
+        let folder = root.appendingPathComponent("sessions/S", isDirectory: true)
+        for sub in ["photos", "rectified"] {
+            try FileManager.default.createDirectory(at: folder.appendingPathComponent(sub), withIntermediateDirectories: true)
+        }
+        for p in photos {
+            try ImageOps.writeJPEG(ImageOps.makeGrayImage(GrayImage(width: p.image.width, height: p.image.height, fill: 120))!,
+                                   to: folder.appendingPathComponent(p.image.file))
+            if let r = p.flat?.rectified {
+                try ImageOps.writeJPEG(ImageOps.makeGrayImage(GrayImage(width: r.width, height: r.height, fill: 230))!,
+                                       to: folder.appendingPathComponent(r.file))
+            }
+        }
+        return LocatedSession(folder: folder, dataDir: root, session: flatSession(photos), receipt: nil)
+    }
+
+    func testFlatPackageWithRectifiedImageAndSize() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-flat-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let located = try writeFlatSession([flatPhoto(1, rectified: true)], root: root)
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        let summary = try PackBuilder(located: located).build(into: out)
+        XCTAssertTrue(summary.contains("flat artwork"), summary)
+        XCTAssertTrue(summary.contains("21.0 × 29.7 cm"), summary)
+
+        let top = try FileManager.default.contentsOfDirectory(atPath: out.path).sorted()
+        XCTAssertEqual(top, ["brief.md", "measurements.json", "pack.json", "views"])  // no overview.jpg, no hull.obj
+        let views = try FileManager.default.contentsOfDirectory(atPath: out.appendingPathComponent("views").path).sorted()
+        XCTAssertEqual(views, ["artwork.jpg", "photo.jpg"])
+        let artwork = try ImageOps.loadImage(out.appendingPathComponent("views/artwork.jpg"))
+        XCTAssertEqual([artwork.width, artwork.height], [34, 48])  // the rectified image as is (already upright)
+        let photo = try ImageOps.loadImage(out.appendingPathComponent("views/photo.jpg"))
+        XCTAssertEqual([photo.width, photo.height], [48, 64])  // the original turned 90° clockwise
+
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m.workKind, "flat")
+        XCTAssertEqual(m.status, "ok")
+        XCTAssertEqual(m.method, "flatSheetCorners")
+        XCTAssertEqual(m.sheet?.widthCm, 21)
+        XCTAssertEqual(m.sheet?.heightCm, 29.7)
+        XCTAssertNil(m.sizeCm)
+        XCTAssertNil(m.mesh)
+
+        let index = try JSONDecoder().decode(PackIndex.self, from: Data(contentsOf: out.appendingPathComponent("pack.json")))
+        XCTAssertEqual(index.workKind, "flat")
+        XCTAssertEqual(index.views.map(\.name), ["artwork", "photo"])
+        XCTAssertEqual(index.views[0].cropSource, "rectified")
+        XCTAssertEqual(index.flat?.artworkSource, "rectified")
+        XCTAssertEqual(index.flat?.rectifiedInSession, "rectified/\(Self.pid(1)).jpg")
+        XCTAssertEqual(index.flat?.cameraTiltFromVerticalDeg, 4)
+        XCTAssertEqual(index.coverage.directionPlanId, "flat1")
+        XCTAssertFalse(index.files.contains("overview.jpg"))
+        XCTAssertTrue(index.maskIssues.isEmpty)
+
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("これは平面の作品（絵・貼り絵など）です。"))
+        XCTAssertTrue(brief.contains("3D の形を推論・再構成する必要はありません"))
+        XCTAssertTrue(brief.contains("| 21.0 cm | 29.7 cm |"))
+        XCTAssertFalse(brief.contains("overview.jpg"))
+        XCTAssertFalse(brief.contains("hull.obj"))
+        XCTAssertFalse(brief.contains("分かりません"))
+        // up to date: the same manifest hash would skip; a missing receipt never does
+        XCTAssertFalse(Runner.isUpToDate(out, manifestHash: "x", cutouts: false))
+    }
+
+    func testFlatPackageWithoutSheetSaysSizeIsUnknown() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-flat-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let located = try writeFlatSession([flatPhoto(1, rectified: false, corners: false)], root: root)
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        let summary = try PackBuilder(located: located).build(into: out)
+        XCTAssertTrue(summary.contains("sheet size unknown"), summary)
+        let views = try FileManager.default.contentsOfDirectory(atPath: out.appendingPathComponent("views").path).sorted()
+        XCTAssertEqual(views, ["artwork.jpg"])
+        let artwork = try ImageOps.loadImage(out.appendingPathComponent("views/artwork.jpg"))
+        XCTAssertEqual([artwork.width, artwork.height], [48, 64])  // the upright original
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m.status, "unavailable")
+        XCTAssertNil(m.sheet)
+        XCTAssertEqual(m.unavailableReason, "no sheet (rectangle) was detected in the photo")
+        let obj = try JSONSerialization.jsonObject(with: Data(contentsOf: out.appendingPathComponent("measurements.json"))) as! [String: Any]
+        XCTAssertTrue(obj["sheet"] is NSNull)
+        let index = try JSONDecoder().decode(PackIndex.self, from: Data(contentsOf: out.appendingPathComponent("pack.json")))
+        XCTAssertEqual(index.flat?.artworkSource, "uprightPhoto")
+        XCTAssertNil(index.flat?.corners)
+        XCTAssertTrue(index.views[0].notes.contains { $0.contains("no sheet was detected") })
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("**大きさは分かりません**"))
+        XCTAssertTrue(brief.contains("遠近を直していない"))
+        XCTAssertTrue(brief.contains("3D の形を推論・再構成する必要はありません"))
+    }
+
+    func testObjectPackIndexCarriesWorkKind() throws {
+        let s = session([photo(1, az: 2, el: 21)])
+        let index = PackIndex(workKind: s.workKind.rawValue, provenance: .init(sessionId: "S", generatedAt: "", tool: "", toolVersion: "", sourceFolder: ""),
+                              title: "", views: [], coverage: .init(referenceFrameIds: [], photoCount: 0, photosInReferenceFrame: 0, directionPlanId: "", bands: [], missingViews: [], weakViews: []),
+                              maskIssues: [], files: [], timingsS: [:])
+        let obj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(index)) as! [String: Any]
+        XCTAssertEqual(obj["workKind"] as? String, "object")
+        XCTAssertNil(obj["flat"])
+        // packages written before 0.3.0 have no workKind and still decode
+        var old = obj
+        old.removeValue(forKey: "workKind")
+        XCTAssertNil(try JSONDecoder().decode(PackIndex.self, from: JSONSerialization.data(withJSONObject: old)).workKind)
+    }
 }

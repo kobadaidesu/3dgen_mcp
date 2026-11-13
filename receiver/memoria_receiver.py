@@ -44,7 +44,7 @@ SCHEMA_VERSION = 1
 
 UUID_PATTERN = r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}"
 SESSION_ID_RE = re.compile(UUID_PATTERN)
-FILE_PATH_RE = re.compile(r"session\.json|photos/%s\.jpg|masks/%s\.png" % (UUID_PATTERN, UUID_PATTERN))
+FILE_PATH_RE = re.compile(r"session\.json|photos/%s\.jpg|masks/%s\.png|rectified/%s\.jpg" % (UUID_PATTERN, UUID_PATTERN, UUID_PATTERN))
 SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 UPLOAD_ID_RE = re.compile(r"[0-9a-f]{64}")
 PAIRING_CODE_RE = re.compile(r"[0-9]{6}")
@@ -55,6 +55,7 @@ MAX_MANIFEST_BODY = 2 * 1024 * 1024
 DRAIN_LIMIT = 8 * 1024 * 1024  # unread request bodies up to this size are drained to keep the connection
 CHUNK_SIZE = 1024 * 1024
 MASK_FILE_STATUSES = ("candidate", "confirmed")
+WORK_KINDS = ("object", "flat")  # session.json "workKind" (added later; missing or null = "object")
 AUTH_FAIL_LIMIT = 20  # failed tokens per client IP within AUTH_FAIL_WINDOW -> 429
 AUTH_FAIL_WINDOW = 300.0
 SIPS_PATH = "/usr/bin/sips"
@@ -309,6 +310,9 @@ def validate_session(path: Path, session_id: str, manifest_paths):
         errors.append("schemaVersion が %d ではありません" % SCHEMA_VERSION)
     if data.get("sessionId") != session_id:
         errors.append("sessionId が URL の %s と違います" % session_id)
+    kind = data.get("workKind")
+    if kind is not None and kind not in WORK_KINDS:
+        errors.append("workKind は %s のどれか（または無し）であるべきです（%r）" % (" / ".join(WORK_KINDS), kind))
     photos = data.get("photos")
     if not isinstance(photos, list):
         errors.append("photos が配列ではありません")
@@ -333,6 +337,7 @@ def validate_session(path: Path, session_id: str, manifest_paths):
             errors.append("%s.image.file は %s であるべきです（%r）" % (label, expected, image_file))
         elif image_file not in manifest_paths:
             errors.append("%s.image.file %s が manifest にありません" % (label, image_file))
+        errors.extend(validate_flat(photo.get("flat"), label, pid, manifest_paths))
         mask = photo.get("mask")
         if mask is None:
             continue
@@ -347,6 +352,45 @@ def validate_session(path: Path, session_id: str, manifest_paths):
             elif mask_file not in manifest_paths:
                 errors.append("%s.mask.file %s が manifest にありません" % (label, mask_file))
     return data, errors[:50]
+
+
+def validate_flat(flat, label: str, pid: str, manifest_paths):
+    """photos[].flat (flat artwork, added later): null/missing is fine; corners need 4 [x, y] points and
+    rectified.file must be rectified/<photoId>.jpg and in the manifest."""
+    errors = []
+    if flat is None:
+        return errors
+    if not isinstance(flat, dict):
+        return ["%s.flat がオブジェクトではありません" % label]
+    corners = flat.get("corners")
+    if corners is not None:
+        names = ("topLeft", "topRight", "bottomRight", "bottomLeft")
+        ok = isinstance(corners, dict) and all(
+            isinstance(corners.get(n), list) and len(corners[n]) == 2
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in corners[n]) for n in names)
+        if not ok:
+            errors.append("%s.flat.corners は topLeft・topRight・bottomRight・bottomLeft の [x, y] であるべきです" % label)
+    size = flat.get("size")
+    if size is not None:
+        ok = isinstance(size, dict) and all(
+            isinstance(size.get(k), (int, float)) and not isinstance(size.get(k), bool) and size.get(k) > 0
+            for k in ("widthM", "heightM"))
+        if not ok:
+            errors.append("%s.flat.size の widthM・heightM が正の数ではありません" % label)
+    rectified = flat.get("rectified")
+    if rectified is not None:
+        rfile = rectified.get("file") if isinstance(rectified, dict) else None
+        expected = "rectified/%s.jpg" % pid
+        if rfile != expected:
+            errors.append("%s.flat.rectified.file は %s であるべきです（%r）" % (label, expected, rfile))
+        elif rfile not in manifest_paths:
+            errors.append("%s.flat.rectified.file %s が manifest にありません" % (label, rfile))
+    return errors
+
+
+def work_kind_of(session) -> str:
+    kind = session.get("workKind") if isinstance(session, dict) else None
+    return kind if kind in WORK_KINDS else "object"
 
 
 def rotation_of(photo) -> "int | None":
@@ -384,6 +428,7 @@ def scan_sessions(data_dir: Path):
         entries.append({
             "sessionId": d.name,
             "title": session.get("title"),
+            "workKind": work_kind_of(session),
             "photoCount": len(photos),
             "maskCount": dict(sorted(mask_count.items())),
             "receivedAt": receipt.get("receivedAt"),
@@ -1116,6 +1161,9 @@ def connect_urls(addresses, port: int, allow_remote: bool = False):
     return urls, warnings
 
 
+KIND_LABELS = {"object": "立体", "flat": "平面"}
+
+
 def cmd_list(args) -> int:
     data_dir = Path(args.data_dir).expanduser().resolve()
     index = read_json(data_dir / "index.json")
@@ -1124,11 +1172,12 @@ def cmd_list(args) -> int:
         sessions = scan_sessions(data_dir)
     print("完了したセッション: %d 件（%s）" % (len(sessions), data_dir / "sessions"))
     if sessions:
-        print("%-36s  %5s  %-28s  %-25s  %s" % ("sessionId", "写真", "マスク", "受信", "タイトル"))
+        print("%-36s  %-4s  %5s  %-28s  %-25s  %s" % ("sessionId", "種類", "写真", "マスク", "受信", "タイトル"))
         for s in sessions:
             masks = ", ".join("%s=%d" % kv for kv in (s.get("maskCount") or {}).items()) or "-"
-            print("%-36s  %5s  %-28s  %-25s  %s" % (s.get("sessionId"), s.get("photoCount"), masks,
-                                                    s.get("receivedAt") or "-", s.get("title") or ""))
+            kind = KIND_LABELS.get(s.get("workKind") or "object", "立体")
+            print("%-36s  %-4s  %5s  %-28s  %-25s  %s" % (s.get("sessionId"), kind, s.get("photoCount"), masks,
+                                                          s.get("receivedAt") or "-", s.get("title") or ""))
     incoming = scan_incoming(data_dir)
     print("転送途中（未完成。使わないでください）: %d 件" % len(incoming))
     for sid, uid, present, total in incoming:
@@ -1155,6 +1204,9 @@ def cmd_show(args) -> int:
     photos = session.get("photos") if isinstance(session.get("photos"), list) else []
     print("セッション   : %s" % folder.name)
     print("タイトル     : %s" % (session.get("title") or ""))
+    kind = work_kind_of(session)
+    plan = session.get("directionPlan") if isinstance(session.get("directionPlan"), dict) else {}
+    print("種類         : %s（workKind %s、撮影方向 %s）" % (KIND_LABELS[kind], kind, plan.get("id") or "-"))
     print("フォルダ     : %s" % folder)
     print("受信         : %s  manifestHash %s" % (receipt.get("receivedAt"), receipt.get("manifestHash")))
     print("写真         : %d 枚" % len(photos))
@@ -1170,7 +1222,17 @@ def cmd_show(args) -> int:
             p.get("sequence"), pid, "確定" if d.get("confirmed") else "参考",
             num(d.get("azimuthDeg")), num(d.get("elevationDeg")), d.get("targetId") or "-",
             mask.get("status") or "-", (p.get("image") or {}).get("displayRotationDegClockwise")))
-        files = ["photos/%s.jpg" % pid, "masks/%s.png" % pid, "upright/photos/%s.jpg" % pid, "upright/masks/%s.png" % pid]
+        flat = p.get("flat") if isinstance(p.get("flat"), dict) else None
+        if flat is not None:
+            size = flat.get("size") if isinstance(flat.get("size"), dict) else None
+            print("     用紙 %s  端 %s  実寸 %s  補正 %s" % (
+                "あり" if flat.get("corners") else "見つからない",
+                {True: "かかっている", False: "OK"}.get(flat.get("sheetAtFrameEdge"), "-"),
+                "%s × %s cm（%s）" % (num((size.get("widthM") or 0) * 100), num((size.get("heightM") or 0) * 100),
+                                     size.get("planeSource")) if size else "不明",
+                "あり" if flat.get("rectified") else "なし"))
+        files = ["photos/%s.jpg" % pid, "masks/%s.png" % pid, "rectified/%s.jpg" % pid,
+                 "upright/photos/%s.jpg" % pid, "upright/masks/%s.png" % pid]
         existing = [f for f in files if (folder / f).is_file()]
         print("     " + ("  ".join(existing) if existing else "（ファイルなし）"))
     return 0
@@ -1214,9 +1276,9 @@ iPhone のアプリから同じネットワーク（自宅の LAN・USB ケー�
 
 | 場所 | 中身 | 使ってよいか |
 |---|---|---|
-| `for_claude/<sessionId>/` | AI ツール向けの入力（`brief.md`・`overview.jpg`・`views/`・`measurements.json`・`hull.obj`・`pack.json`）。受信のたびに `tools/claude-pack` の `memoria-pack` が作り直す（ビルドしてあるときだけ） | **AI ツールの入口はここ**。読むだけ（作り直すと置き換わる） |
+| `for_claude/<sessionId>/` | AI ツール向けの入力（`brief.md`・`overview.jpg`・`views/`・`measurements.json`・`hull.obj`・`pack.json`。平面の作品は `overview.jpg`・`hull.obj` なし）。受信のたびに `tools/claude-pack` の `memoria-pack` が作り直す（ビルドしてあるときだけ） | **AI ツールの入口はここ**。読むだけ（作り直すと置き換わる） |
 | `sessions/<sessionId>/` | 全部のファイルが届き、ハッシュと session.json を確かめ終わったセッション | 元のデータ。**書き込まない**（計算に使うのはここだけ） |
-| `index.json` | `sessions/` の一覧（sessionId・title・photoCount・maskCount（mask.status ごとの数）・receivedAt・manifestHash・path） | 一覧を見るのに使う |
+| `index.json` | `sessions/` の一覧（sessionId・title・workKind（object＝立体・flat＝平面）・photoCount・maskCount（mask.status ごとの数）・receivedAt・manifestHash・path） | 一覧を見るのに使う |
 | `incoming/` | 転送の途中。ファイルが欠けていたり、確かめる前だったりする | **使わない・読まない・消さない**（受信サーバーが使う） |
 | `replaced/<sessionId>-<UTC 時刻>/` | 同じセッションを撮り直して送り直したときの前の版 | 前の版が要るときだけ |
 | `.receiver.json` | 受信機の ID とペアリングコード | 触らない（秘密の値を含む） |
@@ -1235,6 +1297,7 @@ pack.json           写真の選び方・出どころ（sessionId・manifestHash
 ```
 
 向き：AI 用 5 方向（ai5）のセッションは front・right・back・left・top（真上）。ほかは front・front_right・right・back_right・back・back_left・left・front_left（低い段）、top（一番高い写真）、front_high。
+平面の作品（session.json の `workKind` が `flat`。絵・貼り絵などを真上から 1 枚）は `views/artwork.jpg`（遠近を直してまっすぐにした絵。直せなかったときは写真をまっすぐに回したもの）と、補正したときは `views/photo.jpg`（元の写真をまっすぐに回したもの）。3D の形を作る必要はなく、絵を板や額の表面に貼る形で使えます。
 手で作り直すときは `tools/claude-pack/.build/release/memoria-pack <sessionId の先頭> --force`（背景を透明にした `views/<向き>_cutout.png` も要るときは `--cutouts`）。
 
 ## 1 つのセッションの中身（`sessions/<sessionId>/`）
@@ -1243,6 +1306,7 @@ pack.json           写真の選び方・出どころ（sessionId・manifestHash
 session.json            メタデータ（形は docs/data-format.md）
 photos/<photoId>.jpg    元写真（センサーの向きのまま。回転・縮小・切り抜きなし）
 masks/<photoId>.png     作品マスク（元写真と同じ幅・高さ・向き。8bit グレー、255 = 作品、0 = 背景）
+rectified/<photoId>.jpg 平面の作品だけ：用紙の四隅から遠近を直してまっすぐにした画像（作れたときだけ。元写真は別に残る）
 _receipt.json           受信の記録（complete・manifestHash・receivedAt・files（path・size・sha256））
 upright/photos/<photoId>.jpg   表示用にまっすぐ回したコピー（sips があるときだけ）
 upright/masks/<photoId>.png    同じくマスクの表示用コピー
@@ -1250,6 +1314,7 @@ upright/masks/<photoId>.png    同じくマスクの表示用コピー
 
 - `session.json` の `photos[]` の 1 つが 1 枚の写真です。`photos[].photoId` → `photos/<photoId>.jpg`（`image.file`）。
 - マスクは `photos[].mask.status` が `candidate`（自動で選んだ・未確定）か `confirmed`（ユーザーが確認）のときだけ `masks/<photoId>.png`（`mask.file`）があります。ほかの status（`notGenerated`・`processing`・`failed`・`noObject`）ではマスクはありません。
+- 平面の作品（`workKind` が `flat`）はマスクを作りません。`photos[].flat` に、用紙の四隅（`corners`。元写真のピクセル。無ければ null）・実寸（`size`。測れなければ null）・補正した画像（`rectified`）が入ります。
 - カメラの姿勢 `camera.cameraToWorld`、内部パラメータ `camera.intrinsics`（K）、方向 `direction` は写真ごとです。`direction.confirmed` が false の写真の方向は参考値です。
 - 別の `referenceFrameId` の写真どうしの姿勢は比べられません（同じ世界座標とは限らない）。
 

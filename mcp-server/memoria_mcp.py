@@ -31,6 +31,8 @@ INSTRUCTIONS = """\
 Memoria Capture: photo sessions of a physical object (often a child's artwork) shot with the iPhone app and
 received on this Mac. Flow: receiver_status -> list_sessions or latest_session -> get_brief (read the brief
 first) -> get_view for the overview and views -> build a 3D model -> save it under the folder from output_dir.
+workKind "flat" means flat artwork (a drawing or collage) shot once from above: no 3D reconstruction is needed;
+use the picture (view "artwork") on a thin panel or frame of the measured sheet size.
 Every result has absolute paths, so with file access you can also open files directly.
 The photos are the user's private data; viewing them sends them to the model provider, so only do it when the
 user asked for this work. Never modify anything under captures/sessions/ and never read captures/incoming/.
@@ -57,7 +59,8 @@ def run(fn, *args, **kwargs):
 def list_sessions(limit: int = 20) -> str:
     """List received capture sessions, newest first.
 
-    Each entry: sessionId, title, capturePlan (e.g. "ai5" = 5 photos front/right/back/left/top), photoCount,
+    Each entry: sessionId, title, workKind ("object" = 3D work, "flat" = flat artwork shot once from above),
+    capturePlan (e.g. "ai5" = 5 photos front/right/back/left/top, "flat1" = 1 photo from above), photoCount,
     receivedAt, hasPack (whether the AI-ready pack for_claude/<id>/ exists), packDir, briefPath, sessionDir
     (absolute paths). Use a sessionId (or a unique prefix of it) with the other tools.
     """
@@ -81,7 +84,9 @@ def get_brief(session: str) -> list[TextContent]:
     """Read the AI-ready pack of a session: brief.md (read it fully first), measurements, and available views.
 
     `session` is a full sessionId or a unique prefix (case-insensitive). The second block is JSON with
-    measurements (real size in metres/cm with uncertainty, or a rough user-set cylinder for 5-photo sessions),
+    workKind ("flat": flat artwork, views "artwork" (rectified picture) and "photo", measurements.sheet = sheet
+    size or null, no overview), measurements (real size in metres/cm with uncertainty, or a rough user-set
+    cylinder for 5-photo sessions),
     views (name, kind photo/cutout, direction azimuth/elevation in degrees: 0 = front, 90 = right, 180 = back,
     270 = left; pixel size; absolute path), missingViews, overview, and hullObjPath (coarse shape, older packs
     only). Pass a view name, or "overview", to get_view.
