@@ -1,12 +1,13 @@
 // capture-e2e：小さな合成セッションを作って、受信側（receiver/memoria_receiver.py）へ送る確認ツール（macOS）。
 //
-//   swift run capture-e2e http://127.0.0.1:8765 123456 [--keep] [--flat [--sheet=<紙の id>] | --heading [--height-cm=<高さ>]]
+//   swift run capture-e2e http://127.0.0.1:8765 123456 [--keep] [--flat [--sheet=<紙の id>] | --heading [--height-cm=<高さ>] | --free [--height-cm=<高さ>]]
 //
 // 1. 一時フォルダに SessionStore で合成セッション（写真 3 枚・マスク 2 枚）を作る
 //    --flat のときは平面の作品のセッション（workKind flat・flat1。真上の写真 1 枚・用紙の四隅・実寸・補正した画像）
 //      --sheet=yatsugiri などで、撮る人が選んだ紙（declaredSize.sheet。id は SheetPreset）も付ける
 //    --heading のときは向きで案内した立体のセッション（guidance heading・ai5。5 枚・十字のまわりのマスク・撮ったあとに求めた中心と大きさ）
 //      --height-cm=12 などで、撮る人が入力した高さ（declaredSize.heightM）も付ける
+//    --free のときは自由に撮った立体のセッション（guidance free・一覧 free。4 枚・基準もマスクも無し）。--height-cm も使える
 //    どちらのオプションも付けなければ declaredSize は null（今までどおり）
 // 2. 送る → complete を期待
 // 3. もう一度送る → alreadyComplete を期待
@@ -46,7 +47,8 @@ let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("--") }
 let keep = CommandLine.arguments.contains("--keep")
 let flatMode = CommandLine.arguments.contains("--flat")
 let headingMode = CommandLine.arguments.contains("--heading")
-let usage = "使い方: capture-e2e <受信側の URL（http://IP:port）> <ペアリングコード> [--keep] [--flat [--sheet=<紙の id>] | --heading [--height-cm=<高さ>]]"
+let freeMode = CommandLine.arguments.contains("--free")
+let usage = "使い方: capture-e2e <受信側の URL（http://IP:port）> <ペアリングコード> [--keep] [--flat [--sheet=<紙の id>] | --heading [--height-cm=<高さ>] | --free [--height-cm=<高さ>]]"
 guard args.count >= 2, let receiverURL = TransferClient.receiverURL(fromUserInput: args[args.startIndex]) else {
     print(usage)
     exit(2)
@@ -67,7 +69,7 @@ let declaredSheet: DeclaredSheet? = {
     }
     return DeclaredSheet(preset)
 }()
-/// 撮る人が入力した高さ（--height-cm=<cm>）。--heading のときだけ使う。
+/// 撮る人が入力した高さ（--height-cm=<cm>）。--heading・--free のときだけ使う。
 let declaredHeightM: Double? = {
     guard let text = optionValue("height-cm") else { return nil }
     guard let height = DeclaredSize.heightM(fromCentimetres: text) else {
@@ -77,7 +79,7 @@ let declaredHeightM: Double? = {
     return height
 }()
 if declaredSheet != nil && !flatMode { print("注意: --sheet は --flat のときだけ使います（無視します）") }
-if declaredHeightM != nil && !headingMode { print("注意: --height-cm は --heading のときだけ使います（無視します）") }
+if declaredHeightM != nil && !headingMode && !freeMode { print("注意: --height-cm は --heading・--free のときだけ使います（無視します）") }
 let token = args[args.startIndex + 1]
 
 let root = FileManager.default.temporaryDirectory.appendingPathComponent("capture-e2e-\(UUID().uuidString)")
@@ -90,10 +92,65 @@ if flatMode {
     session = makeFlatSession()
 } else if headingMode {
     session = makeHeadingSession()
+} else if freeMode {
+    session = makeFreeSession()
 } else {
     session = makeObjectSession()
 }
 let sessionId = session.sessionId
+
+/// 自由に撮った立体：作品（原点）のまわりの 3 方向と真上に近い 1 枚（0.35 m）。基準・マスクは無く、向きは傾きだけ。
+func makeFreeSession() -> CaptureSession {
+    var session: CaptureSession
+    do {
+        session = try store.createSession(title: "e2e 自由に撮る", device: device, plan: DirectionPlanPreset.free.plan, workKind: .object,
+                                          guidance: .free, declaredSize: DeclaredSize(heightM: declaredHeightM))
+    } catch {
+        fail("セッションを作れません: \(error)")
+    }
+    let width = 640, height = 480, fx = 560.0
+    let intrinsics = simd_double3x3(rows: [SIMD3(fx, 0, Double(width) / 2), SIMD3(0, fx, Double(height) / 2), SIMD3(0, 0, 1)])
+    for (i, (az, el)) in [(0.0, 20.0), (120, 25), (240, 15), (40, 80)].enumerated() {
+        let a = az * .pi / 180, e = el * .pi / 180
+        let position = 0.35 * SIMD3(sin(a) * cos(e), sin(e), cos(a) * cos(e))
+        let forward = simd_normalize(-position)
+        var right = simd_cross(forward, SIMD3(0, 1, 0))
+        if simd_length(right) < 1e-6 { right = SIMD3(1, 0, 0) }
+        right = simd_normalize(right)
+        let up = simd_cross(right, forward)
+        let cameraToWorld = simd_double4x4(columns: (SIMD4(right, 0), SIMD4(up, 0), SIMD4(-forward, 0), SIMD4(position, 1)))
+        let jpeg = encodeImage(width: width, height: height, gray: false, type: .jpeg) { c in
+            c.setFillColor(CGColor(red: 0.85, green: 0.8, blue: 0.7, alpha: 1))
+            c.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            c.setFillColor(CGColor(red: 0.3 + 0.15 * Double(i), green: 0.5, blue: 0.3, alpha: 1))
+            c.fillEllipse(in: CGRect(x: Double(width) / 2 - 80, y: Double(height) / 2 - 60, width: 160, height: 120))
+        }
+        let frame = CapturedFrameInfo(
+            cameraToWorld: cameraToWorld, intrinsics: intrinsics, intrinsicsResolution: PixelSize(width: width, height: height),
+            imageSize: PixelSize(width: width, height: height), timestamp: 300 + Double(i), exposureDuration: 0.01,
+            exposureOffset: 0, trackingState: .normal, trackingReason: nil
+        )
+        let context = CaptureContext(
+            trigger: .manual, referenceFrameId: nil, liveQuality: .unknown,
+            deviceOrientation: "landscapeLeft", displayRotationDegClockwise: 0, capturedAt: Date()
+        )
+        let photoId = SessionStore.newId()
+        do {
+            try store.addPhoto(sessionId: session.sessionId, photoId: photoId, jpegData: jpeg) { s, sequence in
+                PhotoRecorder.makeFreePhoto(session: s, photoId: photoId, sequence: sequence, frame: frame, context: context)
+            }
+            session = try store.loadSession(session.sessionId)
+        } catch {
+            fail("写真を保存できません: \(error)")
+        }
+    }
+    guard session.usesFreeCapture, session.photos.count == 4, session.photos.allSatisfy({ $0.direction.targetId == nil && $0.mask.status == .notGenerated }),
+          Readiness.make(session: session).isComplete else { fail("自由に撮った写真の記録が想定と違います") }
+    guard session.declaredHeightM == declaredHeightM else { fail("入力した高さを記録できません") }
+    print("自由に撮る：写真 \(session.photos.count) 枚、見下ろす角度 " + session.photos.map { String(format: "%.0f°", $0.direction.elevationDeg ?? -1) }.joined(separator: "・")
+          + (session.declaredHeightM.map { String(format: "、入力した高さ %.1f cm", $0 * 100) } ?? "、高さは入力していない"))
+    return session
+}
 
 /// 平面の作品：真上（0.4 m）から見下ろした写真 1 枚。紙（白）の四隅・実寸（机 y = 0 の平面に当てたもの）・補正した画像。
 func makeFlatSession() -> CaptureSession {

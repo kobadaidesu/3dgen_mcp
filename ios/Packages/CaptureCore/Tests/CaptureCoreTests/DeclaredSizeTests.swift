@@ -23,7 +23,7 @@ final class DeclaredSizeTests: XCTestCase {
         XCTAssertEqual(sheet, DeclaredSheet(id: "a4", longSideM: 0.297, shortSideM: 0.21))
         XCTAssertEqual(sheet.preset, .a4)
         XCTAssertEqual(sheet.displayName, "A4")
-        XCTAssertEqual(DeclaredSheet(id: "custom", longSideM: 0.5, shortSideM: 0.3).displayName, "custom")
+        XCTAssertEqual(DeclaredSheet(id: "legal", longSideM: 0.5, shortSideM: 0.3).displayName, "legal")
     }
 
     private func session(_ kind: WorkKind, _ declared: DeclaredSize?) -> CaptureSession {
@@ -129,6 +129,33 @@ final class DeclaredSizeTests: XCTestCase {
         for bad in ["", "  ", "0.4", "0", "-3", "300.1", "abc", "12cm", "nan", "inf"] {
             XCTAssertNil(DeclaredSize.heightM(fromCentimetres: bad), bad)
         }
+    }
+
+    func testCustomSheet() throws {
+        let sheet = try XCTUnwrap(DeclaredSheet.custom(fromCentimetres: "30", "21"))
+        XCTAssertEqual(sheet.id, "custom")
+        XCTAssertTrue(sheet.isCustom)
+        XCTAssertNil(sheet.preset)
+        XCTAssertEqual(sheet.longSideM, 0.3)
+        XCTAssertEqual(sheet.shortSideM, 0.21)
+        XCTAssertEqual(sheet.displayName, "その他")
+        XCTAssertEqual(sheet.labelWithSize, "その他（21.0 × 30.0 cm）")
+        // 縦・横の順は問わない（長い辺は大きい方）。
+        XCTAssertEqual(DeclaredSheet.custom(fromCentimetres: "21", "30"), sheet)
+        XCTAssertEqual(DeclaredSheet.custom(fromCentimetres: "２１，５", " 30 ")?.shortSideM, 0.215)
+        XCTAssertEqual(DeclaredSheet.custom(fromCentimetres: "1", "300")?.longSideM, 3.0)
+        for (a, b) in [("", "30"), ("21", ""), ("0.9", "30"), ("21", "300.1"), ("abc", "30"), ("-21", "30")] {
+            XCTAssertNil(DeclaredSheet.custom(fromCentimetres: a, b), "\(a) × \(b)")
+        }
+        XCTAssertEqual(DeclaredSheet(.yatsugiri).labelWithSize, "八つ切（27.1 × 39.2 cm）")
+        // 向きの決め方は一覧の紙と同じ。
+        let portrait = try XCTUnwrap(sheet.oriented(horizontal: 700, vertical: 1000))
+        XCTAssertEqual(portrait.widthM, 0.21)
+        XCTAssertEqual(portrait.heightM, 0.3)
+        // session.json では id "custom" のまま読み書きする。
+        let flat = session(.flat, DeclaredSize(sheet: sheet))
+        let data = try SessionJSON.makeEncoder().encode(flat)
+        XCTAssertEqual(try SessionJSON.makeDecoder().decode(CaptureSession.self, from: data).declaredSheet, sheet)
     }
 
     func testRectifiedSizeUsesDeclaredSheet() throws {

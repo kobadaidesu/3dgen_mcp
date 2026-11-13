@@ -88,6 +88,24 @@ struct SettingsView: View {
             }
 
             Section {
+                Picker("案内のしかた", selection: $settings.guidance) {
+                    ForEach(CaptureGuidance.allCases.reversed()) { option in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(option.displayName)
+                            Text(option.summary).font(.caption).foregroundStyle(.secondary)
+                        }
+                        .tag(option)
+                    }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } header: {
+                Text("立体の撮り方")
+            } footer: {
+                Text("「自由に撮る」は案内も自動撮影もなく、シャッターを押すだけです。向きで案内する方法は新しく、まだ試しているところで、AI 用 5 方向のときだけ使えます（ほかの方向はいつも底の中心と円柱）。今あるセッションは、作ったときの方法のままです。")
+            }
+
+            Section {
                 Picker("撮る方向", selection: $settings.planPreset) {
                     ForEach(DirectionPlanPreset.objectPresets) { preset in
                         VStack(alignment: .leading, spacing: 2) {
@@ -99,30 +117,13 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.inline)
                 .labelsHidden()
+                .disabled(settings.guidance == .free)
             } header: {
-                Text("撮る方向")
+                Text("撮る方向（案内つきの撮り方のとき）")
             } footer: {
-                Text("立体の作品の新しいセッションから使われます。今あるセッションは、作ったときの方向のままです。平面の作品は、いつも真上から 1 枚です。")
-            }
-
-            if settings.planPreset == .ai5 {
-                Section {
-                    Picker("案内のしかた", selection: $settings.guidance) {
-                        ForEach(CaptureGuidance.allCases.reversed()) { option in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(option.displayName)
-                                Text(option.summary).font(.caption).foregroundStyle(.secondary)
-                            }
-                            .tag(option)
-                        }
-                    }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-                } header: {
-                    Text("立体の撮り方の案内")
-                } footer: {
-                    Text("向きで案内する方法は新しく、まだ試しているところです。AI 用 5 方向のときだけ使えます（ほかの方向はいつも底の中心と円柱）。今あるセッションは、作ったときの方法のままです。")
-                }
+                Text(settings.guidance == .free
+                     ? "「自由に撮る」では撮る方向を使いません（何枚でも、どの向きでも撮れます）。案内つきの撮り方を選んだときに使います。"
+                     : "立体の作品の新しいセッションから使われます。今あるセッションは、作ったときの方向のままです。平面の作品は、いつも真上から 1 枚です。")
             }
 
             Section {
@@ -130,7 +131,7 @@ struct SettingsView: View {
             } header: {
                 Text("撮影")
             } footer: {
-                Text("自動撮影は、まだ撮っていない方向で、作品が画面に収まり、止まっているときに撮ります（1 枚目の正面は手で撮ります）。")
+                Text("自動撮影は、まだ撮っていない方向で、作品が画面に収まり、止まっているときに撮ります（1 枚目の正面は手で撮ります）。「自由に撮る」では自動撮影はしません。")
             }
 
             Section("この iPhone") {

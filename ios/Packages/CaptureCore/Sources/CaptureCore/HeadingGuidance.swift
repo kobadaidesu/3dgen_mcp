@@ -16,31 +16,45 @@ public enum CaptureGuidance: String, Codable, Sendable, CaseIterable, Identifiab
     case baseCylinder
     /// 作品を画面の中央の十字に合わせ、iPhone の向き（正面から何度回ったか）で案内する。底の中心・円柱は使わない。
     case heading
+    /// 案内なしで、自由に何枚でも撮る（後から足した値）。基準もマスクも作らず、向きはカメラの傾きだけを記録する。
+    /// 撮る方向の一覧はいつも `free`（方向は 0 個）。FreeCapture.swift。
+    case free
 
     public var id: String { rawValue }
 
     /// 新しい立体の作品のセッションの既定。
-    public static let `default`: CaptureGuidance = .heading
+    public static let `default`: CaptureGuidance = .free
 
     public var displayName: String {
         switch self {
-        case .heading: return "向きで案内（標準）"
+        case .free: return "自由に撮る（標準）"
+        case .heading: return "向きで案内"
         case .baseCylinder: return "底の中心と円柱で案内（前の方法）"
         }
     }
 
     public var summary: String {
         switch self {
+        case .free: return "案内なしで、シャッターを押して何枚でも撮ります。正面・横・後ろ・真上があると作りやすくなります"
         case .heading: return "作品を十字に合わせて正面を撮り、まわりを歩くだけ。底の中心・円柱の設定はありません"
         case .baseCylinder: return "先に底の中心と円柱を合わせてから撮ります"
         }
     }
 
-    /// 新しいセッションの案内：平面の作品は無し（null）。向きの案内は AI 用 5 方向（ai5）だけで使え、
-    /// ほかの一覧（48 方向など）はいつも底の中心と円柱。
+    /// 新しいセッションの案内：平面の作品は無し（null）。自由に撮るはどの一覧でも選べる（一覧は `free` になる。
+    /// `newSession`）。向きの案内は AI 用 5 方向（ai5）だけで使え、ほかの一覧（48 方向など）はいつも底の中心と円柱。
     public static func resolve(preferred: CaptureGuidance, plan: DirectionPlan, workKind: WorkKind) -> CaptureGuidance? {
         guard workKind == .object else { return nil }
+        if preferred == .free { return .free }
         return preferred == .heading && supportsHeading(plan) ? .heading : .baseCylinder
+    }
+
+    /// 新しいセッションの撮る方向の一覧と案内のしかた：平面は flat1（案内なし）、立体で自由に撮るなら `free` の一覧、
+    /// それ以外は設定の一覧（`objectPreset`）と `resolve` の案内。
+    public static func newSession(workKind: WorkKind, objectPreset: DirectionPlanPreset, preferred: CaptureGuidance) -> (plan: DirectionPlan, guidance: CaptureGuidance?) {
+        let plan = DirectionPlanPreset.plan(for: workKind, objectPreset: objectPreset)
+        let guidance = resolve(preferred: preferred, plan: plan, workKind: workKind)
+        return (guidance == .free ? DirectionPlanPreset.free.plan : plan, guidance)
     }
 
     /// 向きで案内できる一覧か（ai5 だけ）。
@@ -57,6 +71,9 @@ extension CaptureSession {
 
     /// 向きで案内するセッションか。
     public var usesHeadingGuidance: Bool { captureGuidance == .heading }
+
+    /// 案内なしで自由に撮るセッションか（`guidance` が `free`。基準・マスクを使わない）。
+    public var usesFreeCapture: Bool { captureGuidance == .free }
 }
 
 // MARK: - session.json の項目

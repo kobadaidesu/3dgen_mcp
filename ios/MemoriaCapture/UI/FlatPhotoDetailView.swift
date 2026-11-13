@@ -2,6 +2,7 @@ import CaptureCore
 import SwiftUI
 
 /// 平面の作品の写真 1 枚の確認（遠近を直した画像・元の写真に紙の輪郭、測った大きさ、撮り直し・削除）。
+/// 自由に撮った立体の写真（`guidance` が `free`）もこの画面（紙の表示は無く、傾きと入力した高さだけ）。
 struct FlatPhotoDetailView: View {
     let sessionId: String
     let photoId: String
@@ -100,42 +101,10 @@ struct FlatPhotoDetailView: View {
 
     private func info(_ photo: Photo) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Group {
-                if photo.direction.targetId != nil {
-                    Label("真上から撮りました", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
-                } else {
-                    Label("真上から撮れていません", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                }
-            }
-            .font(.subheadline.bold())
-            if let el = photo.direction.elevationDeg {
-                Text("傾き \(String(format: "%.1f", el))°（90° が真下）").font(.subheadline)
-            }
-            if let sheet = session?.declaredSheet {
-                Text("紙：\(sheet.displayName)（選んだ大きさ。\(String(format: "%.1f × %.1f cm", sheet.shortSideM * 100, sheet.longSideM * 100))）")
-                    .font(.subheadline)
-            }
-            if let flat = photo.flat, flat.corners != nil {
-                Text("紙：見つかりました" + (flat.cornersConfidence.map { "（確からしさ \(String(format: "%.2f", $0))）" } ?? "")).font(.subheadline)
-                if flat.sheetAtFrameEdge == true {
-                    Text("紙の角が写真の端に近く、紙の一部が切れているかもしれません").font(.subheadline).foregroundStyle(.orange)
-                }
-                if let size = flat.size, session?.declaredSheet != nil {
-                    // 紙を選んだときは、測った大きさは参考（選んだ大きさを使う）。
-                    Text("参考：測った大きさ \(String(format: "%.1f × %.1f cm", size.widthM * 100, size.heightM * 100))（\(size.planeSource == "existingPlaneGeometry" ? "見つかった机の平面" : "ARKit が推定した平面")で測定）")
-                        .font(.caption).foregroundStyle(.secondary)
-                } else if let size = flat.size {
-                    Text("大きさ：\(String(format: "%.1f × %.1f cm", size.widthM * 100, size.heightM * 100))（\(size.planeSource == "existingPlaneGeometry" ? "見つかった机の平面" : "ARKit が推定した平面")で測定）")
-                        .font(.subheadline)
-                } else if session?.declaredSheet == nil {
-                    Text("大きさ：測れませんでした（机の平面が見つからなかった）").font(.subheadline).foregroundStyle(.secondary)
-                }
-                if let r = flat.rectified {
-                    Text("直した画像：\(r.width) × \(r.height)").font(.caption).foregroundStyle(.secondary)
-                }
+            if session?.usesFreeCapture == true {
+                freeInfo(photo)
             } else {
-                Text("紙が見つからなかったので、写真の全体をそのまま使います（遠近は直していません\(session?.declaredSheet == nil ? "・大きさは不明" : "")）")
-                    .font(.subheadline).foregroundStyle(.orange)
+                flatInfo(photo)
             }
             if let saved = photo.quality.saved {
                 Text("明るさ \(String(format: "%.2f", saved.meanLuma))・シャープさ \(String(format: "%.4f", saved.sharpness))")
@@ -143,6 +112,60 @@ struct FlatPhotoDetailView: View {
             }
             Text("\(photo.image.width) × \(photo.image.height)・\(photo.trigger == .auto ? "自動" : "手動")撮影")
                 .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    /// 自由に撮った写真（立体）：傾きと入力した高さだけ（方向・紙・マスクは無い）。
+    @ViewBuilder
+    private func freeInfo(_ photo: Photo) -> some View {
+        Label("自由に撮った写真", systemImage: "hand.tap").font(.subheadline.bold())
+        if let el = photo.direction.elevationDeg {
+            Text("見下ろす角度 \(String(format: "%.1f", el))°（0° が水平、90° が真下）").font(.subheadline)
+        }
+        if let height = session?.declaredHeightM {
+            Text(String(format: "高さ：%.1f cm（入力した値）", height * 100)).font(.subheadline)
+        }
+    }
+
+    /// 平面の作品の写真：真上か・紙・大きさ・直した画像。
+    @ViewBuilder
+    private func flatInfo(_ photo: Photo) -> some View {
+        Group {
+            if photo.direction.targetId != nil {
+                Label("真上から撮りました", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            } else {
+                Label("真上から撮れていません", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+            }
+        }
+        .font(.subheadline.bold())
+        if let el = photo.direction.elevationDeg {
+            Text("傾き \(String(format: "%.1f", el))°（90° が真下）").font(.subheadline)
+        }
+        if let sheet = session?.declaredSheet {
+            Text("紙：\(sheet.displayName)（選んだ大きさ。\(String(format: "%.1f × %.1f cm", sheet.shortSideM * 100, sheet.longSideM * 100))）")
+                .font(.subheadline)
+        }
+        if let flat = photo.flat, flat.corners != nil {
+            Text("紙：見つかりました" + (flat.cornersConfidence.map { "（確からしさ \(String(format: "%.2f", $0))）" } ?? "")).font(.subheadline)
+            if flat.sheetAtFrameEdge == true {
+                Text("紙の角が写真の端に近く、紙の一部が切れているかもしれません").font(.subheadline).foregroundStyle(.orange)
+            }
+            if let size = flat.size, session?.declaredSheet != nil {
+                // 紙を選んだときは、測った大きさは参考（選んだ大きさを使う）。
+                Text("参考：測った大きさ \(String(format: "%.1f × %.1f cm", size.widthM * 100, size.heightM * 100))（\(size.planeSource == "existingPlaneGeometry" ? "見つかった机の平面" : "ARKit が推定した平面")で測定）")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if let size = flat.size {
+                Text("大きさ：\(String(format: "%.1f × %.1f cm", size.widthM * 100, size.heightM * 100))（\(size.planeSource == "existingPlaneGeometry" ? "見つかった机の平面" : "ARKit が推定した平面")で測定）")
+                    .font(.subheadline)
+            } else if session?.declaredSheet == nil {
+                Text("大きさ：測れませんでした（机の平面が見つからなかった）").font(.subheadline).foregroundStyle(.secondary)
+            }
+            if let r = flat.rectified {
+                Text("直した画像：\(r.width) × \(r.height)").font(.caption).foregroundStyle(.secondary)
+            }
+        } else {
+            Text("紙が見つからなかったので、写真の全体をそのまま使います（遠近は直していません\(session?.declaredSheet == nil ? "・大きさは不明" : "")）")
+                .font(.subheadline).foregroundStyle(.orange)
         }
     }
 

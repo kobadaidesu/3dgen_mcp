@@ -17,7 +17,8 @@ final class AppSettings: ObservableObject {
     @Published var planPreset: DirectionPlanPreset { didSet { defaults.set(planPreset.rawValue, forKey: Keys.planPreset) } }
     /// 条件がそろったら自動で撮る。
     @Published var autoCaptureEnabled: Bool { didSet { defaults.set(autoCaptureEnabled, forKey: Keys.autoCapture) } }
-    /// 新しい立体の作品のセッションの案内のしかた（向きで案内・底の中心と円柱）。向きの案内は AI 用 5 方向のときだけ使う。
+    /// 新しい立体の作品のセッションの撮り方（自由に撮る・向きで案内・底の中心と円柱）。保存した値が無ければ自由に撮る。
+    /// 向きの案内は AI 用 5 方向のときだけ使い、自由に撮るときは撮影方向（`planPreset`）を使わない。
     @Published var guidance: CaptureGuidance { didSet { defaults.set(guidance.rawValue, forKey: Keys.guidance) } }
 
     /// 判定のしきい値（既定値のまま。変えるときは CaptureCore の QualityThresholds）。
@@ -37,9 +38,9 @@ final class AppSettings: ObservableObject {
         receiverURLString = defaults.string(forKey: Keys.receiverURL) ?? ""
         receiverName = defaults.string(forKey: Keys.receiverName) ?? ""
         pairingCode = defaults.string(forKey: Keys.pairingCode) ?? ""
-        // 立体の作品の撮り方だけ（flat1 は「平面」を選んだセッションが使う）。
+        // 立体の作品の撮り方だけ（flat1 は「平面」を選んだセッション、free は自由に撮るセッションが使う）。
         let stored = defaults.string(forKey: Keys.planPreset).flatMap(DirectionPlanPreset.init(rawValue:)) ?? .default
-        planPreset = stored == .flat1 ? .default : stored
+        planPreset = DirectionPlanPreset.objectPresets.contains(stored) ? stored : .default
         autoCaptureEnabled = defaults.object(forKey: Keys.autoCapture) as? Bool ?? true
         guidance = defaults.string(forKey: Keys.guidance).flatMap(CaptureGuidance.init(rawValue:)) ?? .default
     }

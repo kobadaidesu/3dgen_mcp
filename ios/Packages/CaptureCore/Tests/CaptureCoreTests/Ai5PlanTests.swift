@@ -335,7 +335,8 @@ final class MaskRetakePolicyTests: XCTestCase {
     func testPolicyIsPerPlan() {
         XCTAssertEqual(DirectionPlanPreset.ai5.plan.retakePolicy, .lenient)
         XCTAssertEqual(DirectionPlanPreset.flat1.plan.retakePolicy, .notUsed)
-        for preset in DirectionPlanPreset.allCases where preset != .ai5 && preset != .flat1 {
+        XCTAssertEqual(DirectionPlanPreset.free.plan.retakePolicy, .notUsed)
+        for preset in DirectionPlanPreset.allCases where preset != .ai5 && preset != .flat1 && preset != .free {
             XCTAssertEqual(preset.plan.retakePolicy, .strict, preset.rawValue)
         }
         // 保存してある一覧（id で決まる）でも同じ。

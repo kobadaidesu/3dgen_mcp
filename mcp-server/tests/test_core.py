@@ -247,6 +247,10 @@ class FlatTests(CoreTestBase):
         self.assertEqual(originals["declaredSize"], expected)
         self.assertTrue(any("declaredSize" in n for n in originals["notes"]))
         self.assertNoSecrets(brief)
+        session["declaredSize"] = {"sheet": {"id": "custom", "longSideM": 0.3, "shortSideM": 0.21}}
+        write(folder / "session.json", session)
+        self.sessions_snapshot = self.snapshot(self.root / "sessions")
+        self.assertIn("typed in the paper size (custom, 21.0 × 30.0 cm)", core.get_brief(self.root, FLAT)["next"])
 
     def test_flat_original_photos(self):
         result = core.get_original_photos(self.root, FLAT)
@@ -258,6 +262,7 @@ class FlatTests(CoreTestBase):
         self.assertIsNone(core.get_original_photos(self.root, AI5)["photos"][0]["flat"])
 
 
+FREE = "ABCD8888-0000-4000-8000-000000000008"  # free capture 3D session (guidance free, plan free)
 HEADING = "FFFF7777-0000-4000-8000-000000000007"  # heading-guided 3D session (guidance heading)
 
 
@@ -337,6 +342,69 @@ class DeclaredHeightTests(CoreTestBase):
             write(folder / "session.json", session)
             self.assertIsNone(core.list_sessions(self.root)["sessions"][0]["declaredSize"], bad)
         self.sessions_snapshot = self.snapshot(self.root / "sessions")
+
+
+class FreeTests(CoreTestBase):
+    """A free-capture 3D session (guidance free, plan free): photos shot freely, views photo-01..., no overview."""
+
+    def setUp(self):
+        super().setUp()
+        pids = ids(3, "A0000008")
+        photos = []
+        for i, (pid, el) in enumerate(zip(pids, (18.0, 25.0, 82.0))):
+            p = photo(pid, i + 1, None, el, None)
+            p["referenceFrameId"] = None
+            p["direction"]["distanceM"] = None
+            p["mask"] = {"status": "notGenerated", "file": None, "check": None}
+            photos.append(p)
+        make_session(self.root, FREE, "free", photos, "2026-11-12T07:00:00+09:00")
+        folder = self.root / "sessions" / FREE
+        session = json.loads((folder / "session.json").read_text("utf-8"))
+        session["guidance"] = "free"
+        session["referenceFrames"] = []
+        session["declaredSize"] = {"sheet": None, "heightM": 0.08}
+        write(folder / "session.json", session)
+        for pid in pids:
+            (folder / "masks" / ("%s.png" % pid)).unlink()
+        views = [view("photo-%02d" % (i + 1), pid, None, el) for i, (pid, el) in enumerate(zip(pids, (18.0, 25.0, 82.0)))]
+        pack = make_pack(self.root, FREE, views)
+        (pack / "overview.jpg").unlink()
+        index = json.loads((pack / "pack.json").read_text("utf-8"))
+        index["workKind"] = "object"
+        index["guidance"] = "free"
+        index["free"] = {"photoCount": 3, "viewCount": 3, "selection": "all"}
+        write(pack / "pack.json", index)
+        write(pack / "measurements.json", {"status": "unavailable", "method": "freeCapture", "sizeCm": None,
+                                           "declaredHeight": {"heightM": 0.08, "heightCm": 8.0, "source": "userEntered"}})
+        self.pids = pids
+        self.sessions_snapshot = self.snapshot(self.root / "sessions")
+
+    def test_free_session_summary_brief_and_views(self):
+        by_id = {s["sessionId"]: s for s in core.list_sessions(self.root)["sessions"]}
+        self.assertEqual(by_id[FREE]["guidance"], "free")
+        self.assertEqual(by_id[FREE]["capturePlan"], "free")
+        self.assertEqual(by_id[FREE]["declaredSize"], {"sheet": None, "heightM": 0.08})
+        brief = core.get_brief(self.root, FREE)
+        self.assertEqual(brief["guidance"], "free")
+        self.assertEqual([v["name"] for v in brief["views"]], ["photo-01", "photo-02", "photo-03"])
+        self.assertIsNone(brief["overview"])
+        self.assertIn("Free capture", brief["next"])
+        self.assertIn("decide from the pictures", brief["next"])
+        self.assertIn("typed in the height: 8.0 cm", brief["next"])
+        self.assertEqual(brief["views"][2]["direction"]["elevationDeg"], 82.0)
+        path, _ = core.resolve_view(self.root, FREE, "photo-02")
+        self.assertEqual(path.name, "photo-02.jpg")
+        originals = core.get_original_photos(self.root, FREE)
+        self.assertEqual(originals["guidance"], "free")
+        self.assertEqual(originals["referenceFrames"], [])
+        self.assertTrue(any("guidance free" in n for n in originals["notes"]))
+        self.assertIsNone(originals["photos"][0]["mask"])
+        self.assertNoSecrets(brief)
+
+    def test_other_sessions_keep_their_guidance(self):
+        by_id = {s["sessionId"]: s for s in core.list_sessions(self.root)["sessions"]}
+        self.assertEqual(by_id[AI5]["guidance"], "baseCylinder")
+        self.assertNotIn("Free capture", core.get_brief(self.root, AI5)["next"])
 
 
 class SessionTests(CoreTestBase):

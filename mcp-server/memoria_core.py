@@ -33,7 +33,8 @@ SIPS_PATH = "/usr/bin/sips"
 
 SESSION_ID_RE = re.compile(r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}")
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
-GUIDANCES = ("heading", "baseCylinder")  # session.json "guidance" (added later)
+GUIDANCES = ("heading", "baseCylinder", "free")  # session.json "guidance" (added later; "free" added later still)
+CUSTOM_SHEET_ID = "custom"  # declaredSize.sheet typed in by the person ("その他")
 WORK_KINDS = ("object", "flat")  # session.json "workKind": missing or null means "object" (sessions from before it)
 LABEL_MAX = 64
 
@@ -155,8 +156,9 @@ def work_kind(session) -> str:
 
 
 def guidance(session) -> "str | None":
-    """How 3D work was guided during capture: "heading" (crosshair + phone heading; position and size derived after capture)
-    or "baseCylinder" (base point and cylinder set before shooting; also sessions without the field). None for flat artwork."""
+    """How 3D work was guided during capture: "free" (shot freely, any number of photos, no guidance, no positions or masks),
+    "heading" (crosshair + phone heading; position and size derived after capture) or "baseCylinder" (base point and cylinder
+    set before shooting; also sessions without the field). None for flat artwork."""
     if work_kind(session) == "flat":
         return None
     g = session.get("guidance") if isinstance(session, dict) else None
@@ -392,6 +394,12 @@ def get_brief(root: Path, session: str) -> dict:
         "next": "Look at the overview and views with get_view (view=<name> or 'overview'); originals are listed by "
                 "get_original_photos; write results to the folder from output_dir.",
     }
+    if result["guidance"] == "free":
+        result["next"] = ("Free capture: the photos were shot freely without guidance (views photo-01, photo-02, ... in shooting "
+                          "order, at most 16); which photo shows the front, a side, the back or the top is NOT recorded - decide "
+                          "from the pictures. Only each photo's look-down angle is known (direction.elevationDeg); there is no "
+                          "object position, no mask and no size from the photos (measurements.status 'unavailable', method "
+                          "'freeCapture'). There is no overview. " + result["next"])
     if result["guidance"] == "heading":
         result["next"] = ("Heading-guided capture: no base point or size was set while shooting; the object centre and the "
                           "approximate size (measurements.sizeM, with lowerM/upperM bounds and confidence in "
@@ -410,8 +418,9 @@ def get_brief(root: Path, session: str) -> dict:
                           "needed. Look at the picture with get_view(view='artwork'); put it on a thin panel or frame of "
                           "the sheet size in measurements.sheet (source 'declared': the paper the person picked from the "
                           "app's list, preferred; 'measured': ARKit; null when unknown)"
-                          + ("; the person picked %s (%.1f × %.1f cm)" % (sheet["id"], sheet["shortSideM"] * 100,
-                                                                       sheet["longSideM"] * 100) if sheet else "")
+                          + (("; the person typed in the paper size (custom, %.1f × %.1f cm)" if sheet["id"] == CUSTOM_SHEET_ID
+                              else "; the person picked " + sheet["id"] + " (%.1f × %.1f cm)")
+                             % (sheet["shortSideM"] * 100, sheet["longSideM"] * 100) if sheet else "")
                           + "; write results to the folder from output_dir.")
     return result
 
@@ -548,8 +557,11 @@ def get_original_photos(root: Path, session: str) -> dict:
             "Flat artwork (workKind flat): no masks; flat.corners are the sheet's corners in the photo (pixels), "
             "flat.size the sheet measured on an ARKit plane (null when unknown), flat.rectified the perspective-corrected image.",
             "declaredSize is what the person picked or typed in on the iPhone (not measured; null when nothing was "
-            "entered): sheet (flat artwork: the paper from the app's list, id/longSideM/shortSideM, orientation not "
-            "recorded) or heightM (3D work). It takes precedence over flat.size and over the size derived after capture.",
+            "entered): sheet (flat artwork: the paper from the app's list, or id 'custom' for sizes typed in; "
+            "id/longSideM/shortSideM, orientation not recorded) or heightM (3D work). It takes precedence over flat.size "
+            "and over the size derived after capture.",
+            "Free capture (guidance free): directionPlan 'free' with no targets, no referenceFrames, no masks; each "
+            "photo's direction has only elevationDeg (the camera's look-down angle); which side a photo shows is not recorded.",
             "Heading-guided capture (guidance heading): referenceFrames[].heading.derivation holds the object centre "
             "derived after capture (closest point to the photos' centre lines, with residualRmsM), the approximate size "
             "and origin: 'base' (objectToWorld origin on the table) or 'center' (table height unknown, basePointWorld null, "

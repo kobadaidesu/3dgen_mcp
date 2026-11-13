@@ -35,6 +35,8 @@ workKind "flat" means flat artwork (a drawing or collage) shot once from above: 
 use the picture (view "artwork") on a thin panel or frame of the sheet size (measurements.sheet).
 declaredSize is what the person picked or typed in on the iPhone (flat: the paper from a list; 3D: the height);
 it is not measured and takes precedence over measured or derived sizes.
+guidance "free" (the default for new 3D sessions) means the photos were shot freely without guidance (views photo-01...,
+no direction recorded: judge front/side/back/top from the pictures; no size unless the person typed in a height).
 guidance "heading" means the 3D capture was guided by the phone's heading (crosshair, no base point or cylinder):
 the object position and its approximate size were derived after capture; the brief says how reliable they are.
 Every result has absolute paths, so with file access you can also open files directly.
@@ -64,7 +66,8 @@ def list_sessions(limit: int = 20) -> str:
     """List received capture sessions, newest first.
 
     Each entry: sessionId, title, workKind ("object" = 3D work, "flat" = flat artwork shot once from above),
-    guidance (3D work: "heading" = guided by the phone's heading, position and size derived after capture;
+    guidance (3D work: "free" = shot freely without guidance, any number of photos, no direction recorded;
+    "heading" = guided by the phone's heading, position and size derived after capture;
     "baseCylinder" = base point and cylinder set before shooting; null for flat artwork),
     declaredSize (what the person picked or typed in, not measured: {"sheet": {id, longSideM, shortSideM} for
     flat artwork, "heightM" for 3D work}, or null when nothing was entered), capturePlan (e.g. "ai5" = 5 photos front/right/back/left/top, "flat1" = 1 photo from above), photoCount,
@@ -96,8 +99,9 @@ def get_brief(session: str) -> list[TextContent]:
     declaredSize (picked/typed in on the iPhone; a typed-in height, also in measurements.declaredHeight, takes
     precedence over the derived or measured height), measurements (real size in metres/cm with uncertainty, a rough user-set
     cylinder for 5-photo "baseCylinder" sessions, or for "heading" sessions an approximate size derived after
-    capture with lower/upper bounds and a confidence in measurements.heading),
-    views (name, kind photo/cutout, direction azimuth/elevation in degrees: 0 = front, 90 = right, 180 = back,
+    capture with lower/upper bounds and a confidence in measurements.heading; "free" sessions have no size from the
+    photos, method "freeCapture"),
+    views (name — for "free" sessions photo-01, photo-02, ... in shooting order with only the elevation known — kind photo/cutout, direction azimuth/elevation in degrees: 0 = front, 90 = right, 180 = back,
     270 = left; pixel size; absolute path), missingViews, overview, and hullObjPath (coarse shape, older packs
     only). Pass a view name, or "overview", to get_view.
     """

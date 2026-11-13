@@ -56,7 +56,7 @@ views/photo.jpg     補正した画像があるときだけ：元の写真をま
 measurements.json   workKind "flat"、method "declaredSheet"（撮る人が選んだ紙）か "flatSheetCorners"（ARKit の平面で測った）、
                     sheet（source "declared" | "measured"、widthM・heightM・widthCm・heightCm（幅は絵の横、高さは縦）、
                     longSideM・shortSideM・longSideCm・shortSideCm、orientation "landscape" | "portrait"、
-                    declaredSheetId・declaredSheetName（選んだ紙）、planeSource（測った値のとき）、measured（測った値があればいつも）、photoId）。
+                    declaredSheetId・declaredSheetName（選んだ紙。縦と横を入力した「その他」は id "custom"・名前「その他」）、planeSource（測った値のとき）、measured（測った値があればいつも）、photoId）。
                     どちらも無いときは status "unavailable"・sheet null と理由（推測で埋めない）。sizeCm・sizeM は null
 pack.json           workKind "flat"、views（artwork・photo）、flat（使った写真・紙の四隅・紙が端にかかっているか・補正した画像の場所・カメラの傾き）
 ```
@@ -64,6 +64,20 @@ pack.json           workKind "flat"、views（artwork・photo）、flat（使っ
 - 紙の大きさの優先順：撮る人が一覧から選んだ紙（session.json の `declaredSize.sheet`）→ ARKit の平面で測った実寸（`photos[].flat.size`）→ 分からない。選んだ紙の縦・横の向きは、`views/artwork.jpg` が補正した画像ならその縦横、そうでなければ紙の四隅の辺の長さで決めます（横が縦以上なら横が長い辺）。四隅も無ければ向きは決めず、`widthM`・`heightM` は null（`longSideM`・`shortSideM` だけ）で、`brief.md` に「縦・横の向きは分かりません」と書きます。選んだ紙と測った値の両方があるときは、選んだ紙を使い、測った値を `sheet.measured` と `brief.md` に参考として書きます。
 - `overview.jpg`（方向の一覧）・`hull.obj`・`--cutouts` の PNG は作りません。マスクは使いません。
 - 使う写真：置き換え済みでない（アプリと同じ決まり：一番新しい真上の写真が前の写真を置き換える）、真上（`targetId` あり）、補正した画像がある、紙の四隅がある、画質がよい、新しい、の順。
+
+### 自由に撮った立体（`guidance` が `free`）
+
+撮影アプリで案内なしに自由に撮った立体のセッション（撮る方向の一覧 `free`、方向は 0 個。基準もマスクも無い）は、向きの分かる出力を作りません。
+
+```
+brief.md            自由に撮った n 枚であること、向き・位置の案内はしていないこと、どの写真がどの向きかは写真を見て判断すること、
+                    写真ごとの見下ろす角度、撮る人が入力した高さ（あれば優先）か「大きさは分かりません」
+views/photo-01.jpg… 撮った順に、まっすぐに回した写真（切り抜きなし、長い辺 1568 px 以下）。16 枚より多いときは、撮った順に均等に 16 枚（最初と最後を含む）
+measurements.json   method "freeCapture"、status "unavailable"（大きさは写真から求めない）、declaredHeight（入力した高さ。無ければ null）
+pack.json           guidance "free"、views（photo-01…。方位は null、仰角は見下ろす角度）、free（photoCount・viewCount・selection "all" | "evenlySpaced"）
+```
+
+- `overview.jpg`（方向の一覧）は作りません（並べ方が向きに基づくため）。`hull.obj`・`--cutouts` の PNG も作りません。
 
 ### 向きと写真の選び方
 

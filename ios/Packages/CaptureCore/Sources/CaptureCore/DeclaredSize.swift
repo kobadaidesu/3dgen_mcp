@@ -78,11 +78,39 @@ public struct DeclaredSheet: Codable, Equatable, Sendable {
         self.init(id: preset.rawValue, longSideM: preset.longSideM, shortSideM: preset.shortSideM)
     }
 
+    /// 一覧に無い大きさを撮る人が入力した紙の id（「その他」）。
+    public static let customId = "custom"
+
+    /// 撮る人が縦と横を入力した紙（「その他」）。長い辺は大きい方、短い辺は小さい方（向きは書かない）。
+    public static func custom(sideAM: Double, sideBM: Double) -> DeclaredSheet {
+        DeclaredSheet(id: customId, longSideM: max(sideAM, sideBM), shortSideM: min(sideAM, sideBM))
+    }
+
+    /// 「その他」で入力できる辺の範囲（cm）。
+    public static let minimumCustomSideCm = 1.0
+    public static let maximumCustomSideCm = 300.0
+
+    /// 「その他」の縦と横の入力（cm の文字列）から紙を作る。どちらかが空・数でない・範囲（1〜300 cm）の外なら nil
+    /// （紙は選んでいない扱い。推測で埋めない）。読み方は高さの入力と同じ（全角・「,」も読む。0.1 mm に丸める）。
+    public static func custom(fromCentimetres sideA: String, _ sideB: String) -> DeclaredSheet? {
+        guard let a = DeclaredSize.metres(fromCentimetres: sideA, minimumCm: minimumCustomSideCm, maximumCm: maximumCustomSideCm),
+              let b = DeclaredSize.metres(fromCentimetres: sideB, minimumCm: minimumCustomSideCm, maximumCm: maximumCustomSideCm) else { return nil }
+        return custom(sideAM: a, sideBM: b)
+    }
+
     /// 一覧の紙（一覧に無い id なら nil）。
     public var preset: SheetPreset? { SheetPreset(rawValue: id) }
 
-    /// 表示名（一覧に無い id はその id）。
-    public var displayName: String { preset?.displayName ?? id }
+    /// 撮る人が大きさを入力した紙（「その他」）か。
+    public var isCustom: Bool { id == Self.customId }
+
+    /// 表示名（「その他」は「その他」、一覧に無いほかの id はその id）。
+    public var displayName: String { preset?.displayName ?? (isCustom ? "その他" : id) }
+
+    /// 寸法付きの表示名（例：「八つ切（27.1 × 39.2 cm）」「その他（21.0 × 30.0 cm）」）。
+    public var labelWithSize: String {
+        "\(displayName)（\(String(format: "%.1f", shortSideM * 100)) × \(String(format: "%.1f", longSideM * 100)) cm）"
+    }
 
     /// 画像の横・縦（ピクセルなど、比が分かればよい）に合わせた紙の幅・高さ（m）。
     /// 横が縦以上なら横 = 長い辺、そうでなければ横 = 短い辺。横・縦が正の数でなければ nil（向きを決めない）。
@@ -127,6 +155,12 @@ public struct DeclaredSize: Codable, Equatable, Sendable {
     /// 高さの入力（cm の文字列）を m にする。空・数でない・範囲（0.5〜300 cm）の外は nil（推測で埋めない）。
     /// 全角の数字・小数点と、小数点の「,」も読む。値は 0.1 mm に丸める。
     public static func heightM(fromCentimetres text: String) -> Double? {
+        metres(fromCentimetres: text, minimumCm: minimumHeightCm, maximumCm: maximumHeightCm)
+    }
+
+    /// cm の入力（文字列）を m にする。空・数でない・`minimumCm`〜`maximumCm` の外は nil。
+    /// 全角の数字・小数点と、小数点の「,」も読む。値は 0.1 mm に丸める。
+    public static func metres(fromCentimetres text: String, minimumCm: Double, maximumCm: Double) -> Double? {
         let halfWidth: [Character: Character] = [
             "０": "0", "１": "1", "２": "2", "３": "3", "４": "4", "５": "5", "６": "6", "７": "7", "８": "8", "９": "9",
             "．": ".", "，": ".", ",": ".",
@@ -134,7 +168,7 @@ public struct DeclaredSize: Codable, Equatable, Sendable {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let normalized = String(trimmed.map { halfWidth[$0] ?? $0 })
         guard !normalized.isEmpty, let cm = Double(normalized), cm.isFinite,
-              cm >= minimumHeightCm, cm <= maximumHeightCm else { return nil }
+              cm >= minimumCm, cm <= maximumCm else { return nil }
         return (cm * 100).rounded() / 10000
     }
 }

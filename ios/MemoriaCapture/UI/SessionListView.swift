@@ -123,13 +123,15 @@ struct SessionRow: View {
                     Label("\(summary.photoCount) 枚", systemImage: "photo")
                     if summary.workKind == .flat {
                         Label("真上 \(summary.confirmedDirections)/\(summary.totalDirections)", systemImage: "arrow.down.to.line")
+                    } else if summary.guidance == .free {
+                        Label("自由に撮影", systemImage: "hand.tap")
                     } else {
                         Label("方向 \(summary.confirmedDirections)/\(summary.totalDirections)", systemImage: "circle.dashed")
                     }
                 }
                 .font(.caption).foregroundStyle(.secondary)
                 HStack(spacing: 10) {
-                    if summary.workKind != .flat {
+                    if summary.workKind != .flat && summary.guidance != .free {
                         Text(maskText).font(.caption).foregroundStyle(.secondary)
                     }
                     TransferBadge(status: summary.transferStatus)
@@ -156,8 +158,11 @@ struct NewSessionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var kind: WorkKind = .object
-    /// 選んだ紙の id（`SheetPreset`）。空は「わからない」。
+    /// 選んだ紙の id（`SheetPreset`、「その他」は `DeclaredSheet.customId`）。空は「わからない」。
     @State private var sheetId = ""
+    /// 「その他」の縦と横（cm）の入力。
+    @State private var customSideA = ""
+    @State private var customSideB = ""
     /// 高さ（cm）の入力。空でよい。
     @State private var heightText = ""
 
@@ -203,6 +208,25 @@ struct NewSessionSheet: View {
                             ForEach(SheetPreset.allCases) { preset in
                                 Text(preset.label).tag(preset.rawValue)
                             }
+                            Text("その他（大きさを入力）").tag(DeclaredSheet.customId)
+                        }
+                        if sheetId == DeclaredSheet.customId {
+                            HStack {
+                                Text("縦")
+                                TextField("例：30", text: $customSideA)
+                                    .keyboardType(.decimalPad)
+                                Text("cm").foregroundStyle(.secondary)
+                            }
+                            HStack {
+                                Text("横")
+                                TextField("例：21", text: $customSideB)
+                                    .keyboardType(.decimalPad)
+                                Text("cm").foregroundStyle(.secondary)
+                            }
+                            if customSheet == nil {
+                                Text("縦と横に 1〜300 cm の数を入れてください（このままでは紙の大きさを使いません）")
+                                    .font(.caption).foregroundStyle(.orange)
+                            }
                         }
                     } header: {
                         Text("紙の大きさ")
@@ -244,8 +268,13 @@ struct NewSessionSheet: View {
 extension NewSessionSheet {
     /// 選んだ・入力した大きさ（作品の種類に合わせる。どちらも無ければ nil）。
     private var declaredSize: DeclaredSize? {
-        DeclaredSize(sheet: SheetPreset(rawValue: sheetId).map { DeclaredSheet($0) },
-                     heightM: DeclaredSize.heightM(fromCentimetres: heightText)).normalized(for: kind)
+        let sheet = sheetId == DeclaredSheet.customId ? customSheet : SheetPreset(rawValue: sheetId).map { DeclaredSheet($0) }
+        return DeclaredSize(sheet: sheet, heightM: DeclaredSize.heightM(fromCentimetres: heightText)).normalized(for: kind)
+    }
+
+    /// 「その他」で入力した紙（縦・横のどちらかが使えない数なら nil：紙は選んでいない扱い）。
+    private var customSheet: DeclaredSheet? {
+        DeclaredSheet.custom(fromCentimetres: customSideA, customSideB)
     }
 
     /// 高さに何か入っているのに、使える数ではない。

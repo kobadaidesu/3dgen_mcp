@@ -3,7 +3,7 @@ import CaptureCore
 
 public enum PackInfo {
     public static let toolName = "memoria-pack"
-    public static let toolVersion = "0.5.0"
+    public static let toolVersion = "0.6.0"
 }
 
 public struct Size3: Codable, Equatable, Sendable {
@@ -184,6 +184,7 @@ public struct Measurements: Codable, Sendable {
     /// | "headingDerived" (heading-guided capture: approximate size derived after capture from masks and poses; see `heading`)
     /// | "flatSheetCorners" (flat artwork: the sheet's corners projected onto an ARKit plane; see `sheet`)
     /// | "declaredSheet" (flat artwork: the paper the person picked from the app's list; see `sheet`)
+    /// | "freeCapture" (3D work shot freely: no size is derived; `status` is "unavailable", see `declaredHeight`)
     public var method = "visualHull"
     public var frame: [String: String] = [
         "units": "metres (sizeCm in centimetres)",
@@ -294,11 +295,26 @@ public struct PackIndex: Codable, Sendable {
         @NullCodable public var cameraTiltFromVerticalDeg: Double?
     }
 
+    /// Free capture (`guidance` "free"): how many photos the session has and how the views were picked.
+    public struct FreeSource: Codable, Equatable, Sendable {
+        public var photoCount: Int
+        /// Photos written to `views/photo-NN.jpg`.
+        public var viewCount: Int
+        /// "all" (every photo, in shooting order) | "evenlySpaced" (more than `PackBuilder.maxFreeViews`: spread evenly over the shooting order).
+        public var selection: String
+
+        public init(photoCount: Int, viewCount: Int, selection: String) {
+            self.photoCount = photoCount
+            self.viewCount = viewCount
+            self.selection = selection
+        }
+    }
+
     public var schema = "memoria.claude-pack"
     public var schemaVersion = 1
     /// "object" | "flat". Missing in packages before 0.3.0 (they are all "object").
     public var workKind: String?
-    /// "heading" | "baseCylinder" for 3D work (how the capture was guided; session.json `guidance`), null for flat artwork.
+    /// "free" | "heading" | "baseCylinder" for 3D work (how the capture was guided; session.json `guidance`), null for flat artwork.
     /// Missing in packages before 0.4.0.
     public var guidance: String?
     public var provenance: Provenance
@@ -310,4 +326,6 @@ public struct PackIndex: Codable, Sendable {
     public var timingsS: [String: Double]
     /// Flat artwork only.
     public var flat: FlatSource?
+    /// Free capture only (missing in packages before 0.6.0).
+    public var free: FreeSource?
 }

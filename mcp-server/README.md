@@ -21,7 +21,7 @@
 
 | ツール | 中身 |
 |---|---|
-| `list_sessions(limit=20)` | 受け取ったセッションを新しい順に。sessionId・タイトル・作品の種類（`workKind`。`object` は立体、`flat` は平面）・立体の撮り方の案内（`guidance`。`heading` は向きで案内して位置と大きさを撮ったあとに求めたもの、`baseCylinder` は底の中心と円柱を先に決めたもの。平面は null）・撮る人が選んだ・入力した大きさ（`declaredSize`。平面は一覧から選んだ紙 `sheet`、立体は入力した高さ `heightM`。AR で測った値ではなく、測った値・求めた値より優先する。入力していなければ null）・撮影方法（`capturePlan`。`ai5` は正面・右・後ろ・左・真上の 5 枚、`flat1` は真上から 1 枚）・写真の数・受信時刻・パック（`for_claude/`）があるか・そのパス |
+| `list_sessions(limit=20)` | 受け取ったセッションを新しい順に。sessionId・タイトル・作品の種類（`workKind`。`object` は立体、`flat` は平面）・立体の撮り方（`guidance`。`free` は案内なしで自由に撮ったもの（どの写真がどの向きかは記録していない）、`heading` は向きで案内して位置と大きさを撮ったあとに求めたもの、`baseCylinder` は底の中心と円柱を先に決めたもの。平面は null）・撮る人が選んだ・入力した大きさ（`declaredSize`。平面は一覧から選んだ紙 `sheet`、立体は入力した高さ `heightM`。AR で測った値ではなく、測った値・求めた値より優先する。入力していなければ null）・撮影方法（`capturePlan`。`ai5` は正面・右・後ろ・左・真上の 5 枚、`flat1` は真上から 1 枚）・写真の数・受信時刻・パック（`for_claude/`）があるか・そのパス |
 | `latest_session(received_after=None)` | 一番新しいセッション。`received_after` より後に受け取ったものが無ければ `status: "nothing_new"` |
 | `get_brief(session)` | `brief.md` の本文と、作品の種類（`workKind`）、案内のしかた（`guidance`。`heading` なら大きさは撮ったあとに求めたおおよその値で、`measurements.heading` に下と上の目安・信頼度・中心の線の外れ）、撮る人が選んだ・入力した大きさ（`declaredSize`。立体で高さを入力したときは `next` にも「この高さを優先する」と出る）、実寸（`measurements.json`）、見られる写真の一覧（名前・方位と仰角・ピクセルの大きさ・絶対パス）、撮れていない方向。平面の作品は `flat`（使った写真・紙の四隅など）も |
 | `get_view(session, view, max_side=1568)` | 1 枚の写真を画像で返す（長い辺が `max_side` より大きければ縮める）。パスと方向も返す。`view="overview"` で一覧の画像 |
@@ -33,6 +33,7 @@
 - `session` には sessionId 全体か、先頭の数文字（大文字・小文字は問わない）を渡します。あてはまるものが無い・複数あるときは、候補を並べたエラーを返します。
 - 結果にはすべて絶対パスが入っています。ファイルを読めるエージェントは、元のファイルを直接開けます。
 - 写真の名前（`front`・`top` など）は決め打ちせず、`pack.json` とフォルダにあるものから作ります。`ai5` のパックは背景付きの写真だけ（`hull.obj` なし、実寸は撮影時の円柱の目安）、前の版のパックは `<名前>_cutout.jpg` と `hull.obj` もあります。`get_view` に渡せるのは `get_brief` の一覧にある名前と `overview` だけです。
+- **自由に撮った立体**（`guidance` が `free`）のパックは、撮った順の `photo-01`・`photo-02`…（16 枚まで）だけです。`overview` はありません。どの写真が正面・横・後ろ・真上かは記録していないので、写真を見て決めます。大きさは写真から求めず、撮る人が高さを入力したときだけ `measurements.declaredHeight` にあります。
 - **平面の作品**（`workKind` が `flat`）のパックは、`artwork`（遠近を直した絵。直せなかったときは写真をまっすぐに回したもの）と、補正したときは `photo`（元の写真）だけです。`overview` はありません。紙の大きさは `measurements.sheet`（`source` が `declared` なら撮る人が一覧から選んだ紙、`measured` なら ARKit の平面で測った値。どちらも無ければ null）。3D の形を作る必要はなく、絵を板や額に貼る形で使えます。
 - `get_view` は JPEG を JPEG のまま、透明の PNG（`_cutout.png`）を PNG のまま返します。縮めるのに macOS の `sips` を使います（Pillow などは要りません）。
 

@@ -16,6 +16,8 @@ struct SessionSummary: Identifiable, Equatable {
     let id: String
     let title: String
     let workKind: WorkKind
+    /// 立体の撮り方（平面は nil）。
+    let guidance: CaptureGuidance?
     let photoCount: Int
     let confirmedDirections: Int
     let totalDirections: Int
@@ -89,7 +91,8 @@ final class AppModel: ObservableObject {
             let summaries = store.listSessions().map { session -> SessionSummary in
                 let covered = Coverage.coveredTargetIds(in: session)
                 return SessionSummary(
-                    id: session.sessionId, title: session.title, workKind: session.workKind, photoCount: session.photos.count,
+                    id: session.sessionId, title: session.title, workKind: session.workKind, guidance: session.captureGuidance,
+                    photoCount: session.photos.count,
                     confirmedDirections: session.isFlat ? Readiness.make(session: session).doneCount : covered.count,
                     totalDirections: session.directionPlan.targets.count,
                     maskReady: session.photos.filter { $0.mask.status.hasFile }.count,
@@ -107,17 +110,18 @@ final class AppModel: ObservableObject {
         try? store.loadSession(id)
     }
 
-    /// 新しいセッション。作品の種類で撮り方が決まる（平面は真上から 1 枚、立体は設定の撮る方向）。
+    /// 新しいセッション。作品の種類で撮り方が決まる（平面は真上から 1 枚、立体は設定の撮り方：自由に撮る（既定）か、案内つきの撮る方向）。
     /// `declaredSize` は撮る人が選んだ・入力した大きさ（平面は紙、立体は高さ。無ければ null）。
     func createSession(title: String, workKind: WorkKind, declaredSize: DeclaredSize? = nil) -> CaptureSession? {
         do {
-            let plan = DirectionPlanPreset.plan(for: workKind, objectPreset: settings.planPreset)
+            // 自由に撮るときは撮る方向の一覧も free（`CaptureGuidance.newSession`）。
+            let setup = CaptureGuidance.newSession(workKind: workKind, objectPreset: settings.planPreset, preferred: settings.guidance)
             let session = try store.createSession(
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines),
                 device: DeviceInfoProvider.current(),
-                plan: plan,
+                plan: setup.plan,
                 workKind: workKind,
-                guidance: CaptureGuidance.resolve(preferred: settings.guidance, plan: plan, workKind: workKind),
+                guidance: setup.guidance,
                 declaredSize: declaredSize
             )
             sessionChanged()
@@ -150,12 +154,12 @@ final class AppModel: ObservableObject {
         transfer.isSending(sessionId) || store.isBusy(sessionId)
     }
 
-    /// 途中で止まったマスクの処理と、まだ作っていないマスクを作り直す。平面の作品はマスクを作らない（明るさ・ブレだけ）。
+    /// 途中で止まったマスクの処理と、まだ作っていないマスクを作り直す。平面の作品・自由に撮るセッションはマスクを作らない（明るさ・ブレだけ）。
     private func resumeUnfinishedMasks() {
         store.recoverInterruptedMasks()
         for session in store.listSessions() {
             if session.usesHeadingGuidance { headingSizes.refresh(sessionId: session.sessionId) }
-            if session.isFlat {
+            if session.isFlat || session.usesFreeCapture {
                 for photo in session.photos where photo.quality.saved == nil {
                     masks.enqueue(sessionId: session.sessionId, photoId: photo.photoId)
                 }

@@ -66,7 +66,7 @@ struct ReviewView: View {
                         editingTitle = true
                     }
                     .disabled(model.isLocked(sessionId))
-                    if session?.isFlat != true {
+                    if session?.isFlat != true && session?.usesFreeCapture != true {
                         Button("切り抜きを作り直す") { confirmRegenerate = true }
                             .disabled(model.isLocked(sessionId) || regenerateTargets.isEmpty)
                     }
@@ -150,7 +150,7 @@ struct ReviewView: View {
     private func declaredSizeText(_ session: CaptureSession) -> String {
         if session.isFlat {
             guard let sheet = session.declaredSheet else { return "紙の大きさ：選んでいません（机の平面で測れたときはその大きさを使います）" }
-            return "紙：\(sheet.displayName)（選んだ大きさ。\(String(format: "%.1f × %.1f cm", sheet.shortSideM * 100, sheet.longSideM * 100))）"
+            return "紙：\(sheet.labelWithSize)（選んだ大きさ）"
         }
         guard let height = session.declaredHeightM else { return "高さ：入力していません" }
         return String(format: "高さ：%.1f cm（入力した値。写真から求めた大きさより優先します）", height * 100)
@@ -160,6 +160,8 @@ struct ReviewView: View {
         VStack(alignment: .leading, spacing: 4) {
             if session.isFlat {
                 Text("平面の作品・\(session.photos.count) 枚").font(.headline)
+            } else if session.usesFreeCapture {
+                Text("立体の作品（自由に撮影）・\(session.photos.count) 枚").font(.headline)
             } else {
                 Text("\(session.photos.count) 枚・切り抜き \(session.photos.filter { $0.mask.status.hasFile }.count) 枚")
                     .font(.headline)
@@ -172,7 +174,9 @@ struct ReviewView: View {
             if session.usesHeadingGuidance {
                 HeadingDerivationSummary(session: session)
             }
-            Text(session.isFlat
+            Text(session.usesFreeCapture
+                 ? "自由に撮った写真です（向きの案内はしていません）。どの写真がどの向きかは、Mac で AI が写真を見て決めます。正面・横・後ろ・真上があると作りやすくなります。"
+                 : session.isFlat
                  ? "✓ は真上から撮った写真です。紙が見つかった写真は、遠近を直した画像を出しています。「置き換え済み」は撮り直す前の写真です（送ると Mac では一番新しい真上の写真を使います）。"
                  : session.usesHeadingGuidance
                  ? "✓ は方向が確定した写真、「参考」は方向が参考値の写真です。「前の基準」は正面からやり直す前（撮影画面を開き直す前）に撮った写真です。「向きの外」は狙った向きの外か、その場で回して撮った写真です。"
@@ -189,7 +193,7 @@ struct ReadinessView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Label {
-                if readiness.isFlat {
+                if readiness.isFlat || readiness.isFree {
                     Text(readiness.directionSummary)
                 } else {
                     Text(readiness.referenceFrameId == nil ? "基準を設定して撮った写真がありません" : "最後の基準（\(readiness.referenceFrameId!)）：\(readiness.directionSummary)")
@@ -208,7 +212,9 @@ struct ReadinessView: View {
                     .font(.subheadline).foregroundStyle(.secondary)
             }
             if !readiness.isComplete || readiness.attentionCount > 0 {
-                Text(readiness.isFlat
+                Text(readiness.isFree
+                     ? "1 枚以上あれば送れます。作品の全体が写っている写真を撮ってください。"
+                     : readiness.isFlat
                      ? "このままでも送れますが、紙の全体が真上から写っていて、紙が見つかった写真が理想です。"
                      : "このままでも送れますが、3D にするには、すべての方向に切り抜きのよい写真があるのが理想です。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -290,7 +296,9 @@ struct PhotoCell: View {
                     }
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    if session.isFlat {
+                    if session.usesFreeCapture {
+                        EmptyView()  // マスクを作らない
+                    } else if session.isFlat {
                         FlatBadge(flat: photo.flat).padding(4)
                     } else {
                         MaskBadge(status: photo.mask.status, check: photo.mask.check?.status).padding(4)
@@ -306,7 +314,10 @@ struct PhotoCell: View {
                 }
                 .opacity(issues.contains(.superseded) ? 0.6 : 1)
             HStack(spacing: 4) {
-                if session.isFlat {
+                if session.usesFreeCapture {
+                    // 方向の案内は無い。見下ろす角度だけ。
+                    Text(photo.direction.elevationDeg.map { "見下ろし \(Int($0.rounded()))°" } ?? "傾きなし").foregroundStyle(.secondary)
+                } else if session.isFlat {
                     if photo.direction.targetId != nil {
                         Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                     } else {
@@ -319,7 +330,9 @@ struct PhotoCell: View {
                 } else {
                     Text("参考").foregroundStyle(.orange)
                 }
-                Text(directionLabel).lineLimit(1)
+                if !session.usesFreeCapture {
+                    Text(directionLabel).lineLimit(1)
+                }
             }
             .font(.caption2)
         }

@@ -879,6 +879,79 @@ class DeclaredSizeTests(ReceiverTestCase):
         self.assertIn("declaredSize", (self.data_dir / "README.md").read_text("utf-8"))
 
 
+def make_free_capture(n=3):
+    """A free-capture 3D session (guidance free, plan free with no targets): photos without masks or reference frames."""
+    cap = Capture(photos=[(new_id(), 90, "notGenerated") for _ in range(n)], title="ねんど")
+    cap.session["guidance"] = "free"
+    cap.session["directionPlan"] = {"id": "free", "targets": []}
+    cap.session["referenceFrames"] = []
+    for i, p in enumerate(cap.session["photos"]):
+        p["referenceFrameId"] = None
+        p["direction"] = {"confirmed": True, "targetId": None, "azimuthDeg": None, "elevationDeg": 20.0 + 10 * i,
+                          "distanceM": None, "unconfirmedReason": None}
+    cap.set_session(cap.session)
+    return cap
+
+
+class FreeSessionTests(ReceiverTestCase):
+    def test_free_session_is_accepted_listed_and_shown(self):
+        cap = make_free_capture()
+        cap.session["declaredSize"] = {"sheet": None, "heightM": 0.08}
+        cap.set_session(cap.session)
+        self.send(cap)
+        [entry] = self.index()
+        self.assertEqual(entry["guidance"], "free")
+        self.assertEqual(entry["workKind"], "object")
+        self.assertEqual(entry["maskCount"], {"notGenerated": 3})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(mr.main(["list", "--data-dir", str(self.data_dir)]), 0)
+            self.assertEqual(mr.main(["show", cap.sid[:8], "--data-dir", str(self.data_dir)]), 0)
+        text = out.getvalue()
+        self.assertIn("立体・自由", text)
+        self.assertIn("自由に撮る（guidance free）", text)
+        self.assertIn("選んだ大きさ : 高さ 8.0 cm", text)
+        self.assertIn("仰角 40.0", text)
+
+    def test_invalid_free_plans(self):
+        def empty_plan_without_free(cap):
+            cap.session["guidance"] = "heading"
+
+        def free_with_targets(cap):
+            cap.session["directionPlan"] = {"id": "free", "targets": [{"id": "a000-e15"}]}
+
+        def free_with_other_plan(cap):
+            cap.session["directionPlan"] = {"id": "ai5", "targets": []}
+
+        def empty_plan_missing_guidance(cap):
+            del cap.session["guidance"]
+
+        for mutate in (empty_plan_without_free, free_with_targets, free_with_other_plan, empty_plan_missing_guidance):
+            with self.subTest(mutate.__name__):
+                cap = make_free_capture()
+                mutate(cap)
+                cap.set_session(cap.session)
+                upload_id = self.upload_all(cap)
+                status, body = self.commit(cap, upload_id)
+                self.assertEqual((status, body["status"]), (422, "invalid"), body)
+                self.assertFalse(self.published(cap).exists())
+
+    def test_readme_explains_free_capture(self):
+        readme = (self.data_dir / "README.md").read_text("utf-8")
+        self.assertIn("guidance` が `free`", readme)
+        self.assertIn("photo-01", readme)
+
+    def test_custom_sheet_is_named(self):
+        flat, _ = make_flat_capture()
+        flat.session["declaredSize"] = {"sheet": {"id": "custom", "longSideM": 0.3, "shortSideM": 0.21}}
+        flat.set_session(flat.session)
+        self.send(flat)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            mr.main(["show", flat.sid[:8], "--data-dir", str(self.data_dir)])
+        self.assertIn("紙 その他（21.0 × 30.0 cm、id custom）", out.getvalue())
+
+
 class DisconnectLogTests(ReceiverTestCase):
     def _handle_error(self, error):
         out, err = io.StringIO(), io.StringIO()

@@ -156,8 +156,11 @@ public struct DirectionPlan: Codable, Equatable, Sendable {
     /// 平面の作品（絵・貼り絵など）を真上から 1 枚撮る一覧（flat1）。基準（底の中心・円柱）を使わず、マスクも作らない。
     public var isFlat: Bool { id == DirectionPlanPreset.flat1.rawValue }
 
-    /// 撮る前に基準（底の中心・円柱）を決める一覧か。flat1 だけは基準を作らない（方向は端末の傾きだけで決める）。
-    public var needsReference: Bool { !isFlat }
+    /// 立体の作品を案内なしで自由に撮る一覧（free。方向は 0 個）。基準を使わず、マスクも作らない。
+    public var isFree: Bool { id == DirectionPlanPreset.free.rawValue }
+
+    /// 撮る前に基準（底の中心・円柱）を決める一覧か。flat1・free は基準を作らない（方向は端末の傾きだけで決める）。
+    public var needsReference: Bool { !isFlat && !isFree }
 
     /// 方向の名前（画面に出す）。ai5・flat1 は「正面」「右」…「真上」、ほかは「45°・高さ 20°」。方位を問わない方向は「真上（高さ 90°）」。
     public func displayName(of target: DirectionTarget) -> String {
@@ -204,20 +207,24 @@ public enum DirectionPlanPreset: String, CaseIterable, Codable, Sendable, Identi
     /// 平面の作品（`workKind` が `flat`）：真上から 1 枚（`top-e90`。方位を問わない、iPhone の傾きが 70° 以上）。
     /// 立体の作品の一覧ではないので、設定画面の「撮る方向」には出さない（`objectPresets`）。
     case flat1
+    /// 立体の作品を自由に撮る（`guidance` が `free`）：方向は 0 個（何枚でも、どの向きでも撮れる。`targetId` はいつも null）。
+    /// 設定画面の「撮る方向」には出さない（`objectPresets`）。
+    case free
 
     public var id: String { rawValue }
 
     /// 新しく作るセッションの既定（今あるセッションは session.json の `directionPlan` のまま）。
     public static let `default`: DirectionPlanPreset = .ai5
 
-    /// 立体の作品の撮り方（設定画面で選べる一覧）。flat1 は「平面」を選んだセッションだけが使う。
-    public static var objectPresets: [DirectionPlanPreset] { allCases.filter { $0 != .flat1 } }
+    /// 立体の作品の撮り方（設定画面で選べる一覧）。flat1 は「平面」を選んだセッション、free は自由に撮るセッションだけが使う。
+    public static var objectPresets: [DirectionPlanPreset] { allCases.filter { $0 != .flat1 && $0 != .free } }
 
-    /// 作品の種類で決まる一覧：平面は flat1、立体は `objectPreset`（設定で選んだもの。flat1 が渡されたら既定）。
+    /// 作品の種類で決まる一覧：平面は flat1、立体は `objectPreset`（設定で選んだもの。flat1・free が渡されたら既定）。
+    /// 自由に撮るセッションの一覧は `CaptureGuidance.newSession` が free にする。
     public static func plan(for kind: WorkKind, objectPreset: DirectionPlanPreset) -> DirectionPlan {
         switch kind {
         case .flat: return DirectionPlanPreset.flat1.plan
-        case .object: return (objectPreset == .flat1 ? DirectionPlanPreset.default : objectPreset).plan
+        case .object: return (objectPresets.contains(objectPreset) ? objectPreset : DirectionPlanPreset.default).plan
         }
     }
 
@@ -257,6 +264,7 @@ public enum DirectionPlanPreset: String, CaseIterable, Codable, Sendable, Identi
         case .ring4: return "4 方向（かんたん）"
         case .ring8plusHigh: return "8 方向 + 上から 4 方向"
         case .flat1: return "平面（真上から 1 枚）"
+        case .free: return "自由に撮る"
         }
     }
 
@@ -269,6 +277,7 @@ public enum DirectionPlanPreset: String, CaseIterable, Codable, Sendable, Identi
         case .ring4: return "前後左右だけ。4 枚"
         case .ring8plusHigh: return "1 周と、上から 4 枚。12 枚"
         case .flat1: return "絵・貼り絵などを真上から 1 枚"
+        case .free: return "案内なしで何枚でも"
         }
     }
 
@@ -299,6 +308,8 @@ public enum DirectionPlanPreset: String, CaseIterable, Codable, Sendable, Identi
                 + [DirectionTarget.top(elevationDeg: Self.ai5TopElevation, elevationTolerance: Self.ai5TopElevationTolerance)]
         case .flat1:
             return [DirectionTarget.top(elevationDeg: Self.flatTopElevation, elevationTolerance: Self.flatTopElevationTolerance)]
+        case .free:
+            return []
         }
     }
 }

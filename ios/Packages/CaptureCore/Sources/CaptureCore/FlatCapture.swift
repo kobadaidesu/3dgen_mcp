@@ -9,7 +9,7 @@ import simd
 
 /// 作品の種類（session.json の `workKind`）。
 public enum WorkKind: String, Codable, Sendable, CaseIterable, Identifiable {
-    /// 立体（工作・粘土など）：底の中心と円柱を合わせ、まわりの 5 方向から撮る（今までの撮り方）。
+    /// 立体（工作・粘土など）：まわりから撮る。撮り方は設定で選ぶ（既定は案内なしで自由に撮る。`CaptureGuidance`）。
     case object
     /// 平面（絵・貼り絵など）：真上から 1 枚だけ撮る。基準・マスクは使わない。
     case flat
@@ -27,7 +27,7 @@ public enum WorkKind: String, Codable, Sendable, CaseIterable, Identifiable {
     /// 1 行の説明。
     public var summary: String {
         switch self {
-        case .object: return "まわりを回って、正面・右・後ろ・左・真上の 5 枚を撮ります"
+        case .object: return "作品のまわりから撮ります（正面・横・後ろ・真上があると作りやすくなります）"
         case .flat: return "真上から 1 枚だけ撮ります。紙の四隅を見つけて、まっすぐに直します"
         }
     }

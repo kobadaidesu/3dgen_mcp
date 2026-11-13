@@ -120,7 +120,7 @@ struct FlatCaptureView: View {
         case .capturing:
             VStack(spacing: 10) {
                 if let sheet = controller.declaredSheet {
-                    Text("紙：\(sheet.displayName)（選んだ大きさ）")
+                    Text("紙：\(sheet.isCustom ? sheet.labelWithSize : sheet.displayName)（選んだ大きさ）")
                         .font(.caption)
                         .padding(.horizontal, 8).padding(.vertical, 4)
                         .background(.black.opacity(0.5), in: Capsule())

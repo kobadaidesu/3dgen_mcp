@@ -916,6 +916,125 @@ final class PackKitTests: XCTestCase {
         XCTAssertFalse(try String(contentsOf: out2.appendingPathComponent("brief.md"), encoding: .utf8).contains("撮る人が入力した値"))
     }
 
+    // MARK: - free capture (guidance free, plan free)
+
+    func freePhoto(_ seq: Int, el: Double, W: Int = 64, H: Int = 48) -> Photo {
+        var p = photo(seq, az: 0, el: el, frame: nil, target: nil, mask: .notGenerated)
+        p.direction.azimuthDeg = nil
+        p.direction.distanceM = nil
+        p.image.width = W
+        p.image.height = H
+        p.camera.intrinsicsResolution = PixelSize(width: W, height: H)
+        return p
+    }
+
+    func writeFreeSession(_ photos: [Photo], root: URL, declaredHeightM: Double? = nil) throws -> LocatedSession {
+        let folder = root.appendingPathComponent("sessions/S", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("photos"), withIntermediateDirectories: true)
+        for p in photos {
+            try ImageOps.writeJPEG(ImageOps.makeGrayImage(GrayImage(width: p.image.width, height: p.image.height, fill: 140))!,
+                                   to: folder.appendingPathComponent(p.image.file))
+        }
+        var s = CaptureSession(sessionId: "S", title: "ねんど", createdAt: Date(timeIntervalSince1970: 0),
+                               device: DeviceInfo(model: "", systemName: "iOS", systemVersion: "", appVersion: "", appBuild: ""),
+                               directionPlan: DirectionPlanPreset.free.plan, workKind: .object, guidance: .free,
+                               declaredSize: DeclaredSize(heightM: declaredHeightM))
+        s.photos = photos
+        return LocatedSession(folder: folder, dataDir: root, session: s, receipt: nil)
+    }
+
+    func testChooseFreePhotosKeepsOrderAndSpreadsEvenly() {
+        let few = CaptureSession(sessionId: "S", title: "", createdAt: Date(timeIntervalSince1970: 0),
+                                 device: DeviceInfo(model: "", systemName: "iOS", systemVersion: "", appVersion: "", appBuild: ""),
+                                 directionPlan: DirectionPlanPreset.free.plan, workKind: .object, guidance: .free)
+        var s = few
+        s.photos = [freePhoto(3, el: 10), freePhoto(1, el: 20), freePhoto(2, el: 30)]
+        XCTAssertEqual(PackBuilder.chooseFreePhotos(session: s).map(\.sequence), [1, 2, 3])
+        s.photos = (1...40).map { freePhoto($0, el: 20) }
+        let chosen = PackBuilder.chooseFreePhotos(session: s).map(\.sequence)
+        XCTAssertEqual(chosen.count, PackBuilder.maxFreeViews)
+        XCTAssertEqual(chosen.first, 1)
+        XCTAssertEqual(chosen.last, 40)
+        XCTAssertEqual(chosen, chosen.sorted())
+        XCTAssertEqual(Set(chosen).count, chosen.count)
+        XCTAssertTrue(PackBuilder.chooseFreePhotos(session: few).isEmpty)
+    }
+
+    func testFreePackage() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-free-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let located = try writeFreeSession([freePhoto(1, el: 18), freePhoto(2, el: 25), freePhoto(3, el: 82)], root: root, declaredHeightM: 0.08)
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        let summary = try PackBuilder(located: located).build(into: out)
+        XCTAssertTrue(summary.contains("free capture, 3/3 photos"), summary)
+        XCTAssertTrue(summary.contains("declared height 8.0 cm"), summary)
+
+        let top = try FileManager.default.contentsOfDirectory(atPath: out.path).sorted()
+        XCTAssertEqual(top, ["brief.md", "measurements.json", "pack.json", "views"])  // no overview.jpg, no hull.obj
+        let views = try FileManager.default.contentsOfDirectory(atPath: out.appendingPathComponent("views").path).sorted()
+        XCTAssertEqual(views, ["photo-01.jpg", "photo-02.jpg", "photo-03.jpg"])
+        let first = try ImageOps.loadImage(out.appendingPathComponent("views/photo-01.jpg"))
+        XCTAssertEqual([first.width, first.height], [48, 64])  // turned 90° clockwise
+
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m.method, "freeCapture")
+        XCTAssertEqual(m.status, "unavailable")
+        XCTAssertNil(m.sizeM)
+        XCTAssertNil(m.sheet)
+        XCTAssertEqual(m.declaredHeight?.heightCm, 8)
+
+        let index = try JSONDecoder().decode(PackIndex.self, from: Data(contentsOf: out.appendingPathComponent("pack.json")))
+        XCTAssertEqual(index.workKind, "object")
+        XCTAssertEqual(index.guidance, "free")
+        XCTAssertEqual(index.free, PackIndex.FreeSource(photoCount: 3, viewCount: 3, selection: "all"))
+        XCTAssertEqual(index.views.map(\.name), ["photo-01", "photo-02", "photo-03"])
+        XCTAssertEqual(index.views.map(\.elevationDeg), [18, 25, 82])
+        XCTAssertTrue(index.views.allSatisfy { $0.azimuthDeg == nil && $0.cropSource == "fullImage" })
+        XCTAssertEqual(index.coverage.directionPlanId, "free")
+        XCTAssertFalse(index.files.contains("overview.jpg"))
+
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("案内なしで自由に撮った写真 3 枚"))
+        XCTAssertTrue(brief.contains("写真を見て判断してください"))
+        XCTAssertTrue(brief.contains("**高さは 8.0 cm です。**"))
+        XCTAssertTrue(brief.contains("| `views/photo-03.jpg` | #3 | 82° |"), brief)
+        XCTAssertFalse(brief.contains("**大きさは分かりません**"))
+    }
+
+    func testFreePackageWithoutHeightSaysSizeIsUnknown() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-free-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let located = try writeFreeSession((1...20).map { freePhoto($0, el: 20) }, root: root)
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        let summary = try PackBuilder(located: located).build(into: out)
+        XCTAssertTrue(summary.contains("16/20 photos"), summary)
+        XCTAssertTrue(summary.contains("size unknown"), summary)
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertNil(m.declaredHeight)
+        let index = try JSONDecoder().decode(PackIndex.self, from: Data(contentsOf: out.appendingPathComponent("pack.json")))
+        XCTAssertEqual(index.free?.selection, "evenlySpaced")
+        XCTAssertEqual(index.views.count, 16)
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("**大きさは分かりません**"))
+        XCTAssertTrue(brief.contains("均等に 16 枚"))
+    }
+
+    func testFlatPackageNamesTheCustomSheet() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-flat-custom-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let custom = try XCTUnwrap(DeclaredSheet.custom(fromCentimetres: "30", "21"))
+        let located = try writeFlatSession([flatPhoto(1, rectified: true)], root: root, declared: custom)
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        _ = try PackBuilder(located: located).build(into: out)
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m.sheet?.declaredSheetId, "custom")
+        XCTAssertEqual(m.sheet?.declaredSheetName, "その他")
+        XCTAssertEqual(m.sheet?.widthCm, 21)   // portrait rectified image (34 × 48)
+        XCTAssertEqual(m.sheet?.heightCm, 30)
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("| 21.0 cm | 30.0 cm | 撮る人が入力した紙の大きさ（その他） |"), brief)
+    }
+
     func testObjectPackIndexCarriesWorkKind() throws {
         let s = session([photo(1, az: 2, el: 21)])
         let index = PackIndex(workKind: s.workKind.rawValue, provenance: .init(sessionId: "S", generatedAt: "", tool: "", toolVersion: "", sourceFolder: ""),

@@ -79,7 +79,10 @@ extension PackBuilder {
             m.status = "ok"
             m.method = "declaredSheet"
             m.caveats = [
-                "The sheet size is the paper the person picked from the app's list (\(sheet.declaredSheetId ?? "?"), \(f1mm(sheet.shortSideM)) × \(f1mm(sheet.longSideM)) mm); it was not measured. Prefer it over any measurement.",
+                (sheet.declaredSheetId == DeclaredSheet.customId
+                    ? "The sheet size was typed in by the person (\"other\", \(f1mm(sheet.shortSideM)) × \(f1mm(sheet.longSideM)) mm)"
+                    : "The sheet size is the paper the person picked from the app's list (\(sheet.declaredSheetId ?? "?"), \(f1mm(sheet.shortSideM)) × \(f1mm(sheet.longSideM)) mm)")
+                    + "; it was not measured. Prefer it over any measurement.",
                 sheet.orientation == nil
                     ? "The orientation is unknown (no sheet corners were found): decide from the picture whether the long side is horizontal or vertical."
                     : "The orientation (\(sheet.orientation ?? "")) comes from the sheet's corners in the photo: the longer side of the picture is the long side of the paper.",
@@ -227,15 +230,17 @@ extension Brief {
         out.append("")
         if let s = m.sheet, s.source == "declared" {
             let name = s.declaredSheetName ?? s.declaredSheetId ?? "?"
+            // 「その他」は撮る人が縦と横を入力した紙。
+            let how = s.declaredSheetId == DeclaredSheet.customId ? "撮る人が入力した" : "撮る人が一覧から選んだ"
             if let w = s.widthCm, let h = s.heightCm {
                 out.append("| 幅（絵の横） | 高さ（絵の縦） | 求め方 |")
                 out.append("|---|---|---|")
-                out.append("| \(f1(w)) cm | \(f1(h)) cm | 撮る人が一覧から選んだ紙の大きさ（\(name)） |")
+                out.append("| \(f1(w)) cm | \(f1(h)) cm | \(how)紙の大きさ（\(name)） |")
                 out.append("")
-                out.append("- **紙の大きさは、撮る人が一覧から選んだ値（\(name)、\(f1(s.shortSideCm)) × \(f1(s.longSideCm)) cm）です。** AR で測った値ではありません。この値を使ってください。")
+                out.append("- **紙の大きさは、\(how)値（\(name)、\(f1(s.shortSideCm)) × \(f1(s.longSideCm)) cm）です。** AR で測った値ではありません。この値を使ってください。")
                 out.append("- 縦・横の向きは、写真の中の紙の形から決めました（絵の長い方の辺が紙の長い辺）。")
             } else {
-                out.append("- **紙の大きさは、撮る人が一覧から選んだ値（\(name)、\(f1(s.shortSideCm)) × \(f1(s.longSideCm)) cm）です。** AR で測った値ではありません。この値を使ってください。")
+                out.append("- **紙の大きさは、\(how)値（\(name)、\(f1(s.shortSideCm)) × \(f1(s.longSideCm)) cm）です。** AR で測った値ではありません。この値を使ってください。")
                 out.append("- 縦・横の向きは分かりません（写真の中に紙の四角が見つかりませんでした）。絵を見て、長い辺 \(f1(s.longSideCm)) cm が横か縦かを決めてください。")
             }
             if let measured = s.measured {

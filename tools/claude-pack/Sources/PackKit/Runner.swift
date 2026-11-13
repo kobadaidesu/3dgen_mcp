@@ -179,6 +179,7 @@ public final class PackBuilder {
 
     func write(into dir: URL, started: Date) throws -> String {
         if session.isFlat { return try writeFlat(into: dir, started: started) }
+        if session.usesFreeCapture { return try writeFree(into: dir, started: started) }
         let selection = timed("selectViews") { ViewSelector.select(session: session, maskFileExists: maskExists) }
         var choices = selection.choices
         var tiles: [Overview.Tile] = []

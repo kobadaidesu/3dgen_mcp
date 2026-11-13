@@ -9,17 +9,18 @@
 - **3D の生成そのものは範囲の外です。** 生成は、Claude Code・Codex などの AI エージェントが、ここで作ったデータを読んで行います。生成のアルゴリズムや特定の生成サービスへの接続は、このリポジトリに入れません。
 - 例外として、**平らな作品（貼り絵・紙に描いた絵）を写真 1 枚から GLB にするツール** `tools/flat-art-glb/` を置いています（ユーザーが決めたもの）。撮影アプリや `for_claude/` の流れとはつながっておらず、写真 1 枚と設定ファイルから単独で動きます。
 - 同じく例外として、**上が平らな単純な立体（箱・板・操作盤など）を数枚の写真から GLB にするツール** `tools/solid-glb/` を置いています（ユーザーが決めたもの）。これも撮影の流れとはつながっておらず、写真と設定ファイルから単独で動きます。形はプログラムが組み立て、AI は写真を見て設定ファイルを書きます。生成 AI は使いません。それ以外の立体の作品の生成は、引き続き範囲の外です。
-- 今の方針（ユーザーが決めたもの）は **「AI に推論させながら作る」** です。正面・右・後ろ・左の 4 方向と、最後に真上から撮る **5 枚の撮影（`ai5`）** を、新しいセッションの既定にしています。数枚のよい写真から AI が形を推論する前提なので、写真どうしの重なりは要りません。
-- 立体の作品の撮り方の案内は、**向きで案内する方法（`guidance: "heading"`）** を新しいセッションの既定にしています（ユーザーの案）。作品を画面の中央の十字に合わせて正面を撮り、iPhone の向きが 90°・180°・270° 回った位置と真上で撮ります。底の中心・円柱の設定はありません。作品の位置と大きさは、撮ったあとに写真から求めます。**新しい方法で、実機ではまだ試していません**（下の「未対応・予定」）。前の方法（底の中心と円柱を決めてから撮る `baseCylinder`）は設定で選べ、48 方向（`photogrammetry`）などほかの一覧はいつも前の方法です。
-- 新しいセッションを作るときに、撮る人が作品の種類を選びます。**立体（工作・粘土など）** は上の `ai5`、**平面（絵・貼り絵など）** は真上から 1 枚（`flat1`）です。どちらにするかは人が決め、アプリは自動で見分けません。
+- 今の方針（ユーザーが決めたもの）は **「AI に推論させながら作る」** です。正面・右・後ろ・左の 4 方向と、最後に真上から撮る **5 枚の撮影（`ai5`）** を、案内つきの撮り方の既定にしています（新しい立体のセッションの既定は、下の自由に撮る撮り方）。数枚のよい写真から AI が形を推論する前提なので、写真どうしの重なりは要りません。
+- 立体の作品は、**案内なしで自由に何枚でも撮る方法（`guidance: "free"`）** を新しいセッションの既定にしています（ユーザーが決めたもの）。案内も自動撮影もなく、シャッターを押すだけで、1 枚以上あれば送れます。どの写真がどの向きかは記録せず、AI が写真を見て決めます（下の「撮影から AI に渡るまでの流れ（立体：自由に撮る）」）。下の案内つきの撮り方は、設定の「立体の撮り方」で選べるように残しています。
+- 案内つきの撮り方では、**向きで案内する方法（`guidance: "heading"`）** が標準です（ユーザーの案）。作品を画面の中央の十字に合わせて正面を撮り、iPhone の向きが 90°・180°・270° 回った位置と真上で撮ります。底の中心・円柱の設定はありません。作品の位置と大きさは、撮ったあとに写真から求めます。**新しい方法で、実機ではまだ試していません**（下の「未対応・予定」）。前の方法（底の中心と円柱を決めてから撮る `baseCylinder`）は設定で選べ、48 方向（`photogrammetry`）などほかの一覧はいつも前の方法です。
+- 新しいセッションを作るときに、撮る人が作品の種類を選びます。**立体（工作・粘土など）** は自由に撮る（撮る方向の一覧 `free`。案内つきなら `ai5` など）、**平面（絵・貼り絵など）** は真上から 1 枚（`flat1`）です。どちらにするかは人が決め、アプリは自動で見分けません。
 - 48 方向の写真測量向けの撮影（`photogrammetry`）や Mac での写真測量のツール（`tools/reconstruct/`）は、実験のために残しています。今の主な流れではありません（下の「決めたこと・分かったこと」）。
 
 ## 構成
 
 | ディレクトリ | 中身 | 役割 |
 |---|---|---|
-| `ios/MemoriaCapture/`・`ios/MemoriaCapture.xcodeproj` | iPhone のアプリ（Swift・SwiftUI・ARKit・Vision。iOS 17 以上、外部のライブラリなし） | 撮影の案内・高解像度の写真（`ARSession.captureHighResolutionFrame()`）とカメラの情報の保存・作品マスクの作成と確かめ・平面の作品の用紙の検出と遠近の補正・確認画面・Mac への送信。`App/`・`UI/`・`AR/`・`Analysis/`・`Storage/`・`Transfer/` に分けている。向きで案内する撮影は `AR/HeadingCaptureController.swift`・`UI/HeadingCaptureView.swift`・`Analysis/HeadingSizeService.swift`、前の方法は `AR/CaptureController.swift`、平面の作品の撮影は `AR/FlatCaptureController.swift`・`UI/FlatCaptureView.swift`・`Analysis/SheetDetection.swift` |
-| `ios/Packages/CaptureCore/` | SwiftPM のパッケージ（Foundation・simd・CryptoKit だけ） | アプリの「純粋なロジック」：session.json の型、撮影方向の一覧（`DirectionPlan`）、角度と投影の計算、撮影の進み具合、マスクの範囲と確かめ、向きの案内と撮ったあとの中心・大きさ（`HeadingGuidance.swift`・`HeadingRecorder.swift`・`HeadingDerivation.swift`・`HeadingSize.swift`）、平面の作品の計算（`FlatCapture.swift`：四隅の並べ方・実寸・案内・自動撮影）、撮る人が選んだ・入力した大きさ（`DeclaredSize.swift`：紙の一覧 `SheetPreset`・紙の向き・高さの入力の確かめ）、転送、同じネットワークかの判定（`LocalNetworkPolicy`）。macOS の `swift test` で確かめられる。Mac のツールもこの型を使う。確認用の `capture-e2e`（合成セッションを受信サーバーへ送る）もここ |
+| `ios/MemoriaCapture/`・`ios/MemoriaCapture.xcodeproj` | iPhone のアプリ（Swift・SwiftUI・ARKit・Vision。iOS 17 以上、外部のライブラリなし） | 撮影の案内・高解像度の写真（`ARSession.captureHighResolutionFrame()`）とカメラの情報の保存・作品マスクの作成と確かめ・平面の作品の用紙の検出と遠近の補正・確認画面・Mac への送信。`App/`・`UI/`・`AR/`・`Analysis/`・`Storage/`・`Transfer/` に分けている。自由に撮る撮影は `AR/FreeCaptureController.swift`・`UI/FreeCaptureView.swift`、向きで案内する撮影は `AR/HeadingCaptureController.swift`・`UI/HeadingCaptureView.swift`・`Analysis/HeadingSizeService.swift`、前の方法は `AR/CaptureController.swift`、平面の作品の撮影は `AR/FlatCaptureController.swift`・`UI/FlatCaptureView.swift`・`Analysis/SheetDetection.swift` |
+| `ios/Packages/CaptureCore/` | SwiftPM のパッケージ（Foundation・simd・CryptoKit だけ） | アプリの「純粋なロジック」：session.json の型、撮影方向の一覧（`DirectionPlan`）、角度と投影の計算、撮影の進み具合、マスクの範囲と確かめ、向きの案内と撮ったあとの中心・大きさ（`HeadingGuidance.swift`・`HeadingRecorder.swift`・`HeadingDerivation.swift`・`HeadingSize.swift`）、平面の作品の計算（`FlatCapture.swift`：四隅の並べ方・実寸・案内・自動撮影）、撮る人が選んだ・入力した大きさ（`DeclaredSize.swift`：紙の一覧 `SheetPreset`・「その他」の紙・紙の向き・cm の入力の確かめ）、自由に撮る写真の記録（`FreeCapture.swift`）、転送、同じネットワークかの判定（`LocalNetworkPolicy`）。macOS の `swift test` で確かめられる。Mac のツールもこの型を使う。確認用の `capture-e2e`（合成セッションを受信サーバーへ送る）もここ |
 | `receiver/` | Python 3.9 以上（標準ライブラリだけ） | Mac の受信サーバー `memoria_receiver.py`。同じネットワークからの接続だけを受け、`captures/` に保存する。受け取るたびに `memoria-pack` を裏で動かす |
 | `tools/claude-pack/` | Swift（macOS 14 以上） | `memoria-pack`。受け取ったセッションから AI 向けの入力 `captures/for_claude/<sessionId>/` を作る（平面の作品は、まっすぐにした絵と紙の実寸だけ） |
 | `mcp-server/` | Python（MCP の SDK は uv が入れる。中身の `memoria_core.py` は標準ライブラリだけ） | Claude Code・Codex から撮影データを読む MCP サーバー（`list_sessions`・`get_brief`・`get_view` など） |
@@ -31,7 +32,20 @@
 
 session.json の形は [docs/data-format.md](docs/data-format.md) が正です。iPhone・受信サーバー・Mac のツールは同じ形を読み書きします。項目を足すときは、無くても読めるようにして `schemaVersion` を 1 のままにしてきました（足した項目はどれも「後から足した項目」と書いてある）。
 
-## 撮影から AI に渡るまでの流れ（立体：`ai5`・向きで案内）
+## 撮影から AI に渡るまでの流れ（立体：自由に撮る。標準）
+
+1〜2 は下の「向きで案内」と同じです（受信サーバーの起動と、iPhone の送り先の設定）。
+
+3. 「新しく撮る」で作品名を入れ、作品の種類で **「立体（工作・粘土など）」**（既定）を選びます。分かれば **「高さ（cm・分かれば）」** を入れます（空でよい。session.json の `declaredSize.heightM`）。設定の「立体の撮り方」が **「自由に撮る（標準）」** なら、撮る方向の一覧は `free`（方向は 0 個）、`guidance` は `free` になります。
+4. 撮影画面には「作品の全体を画面に入れて撮ってください。正面・横・後ろ・真上があると、形を作りやすくなります」という目安と、撮った枚数・入力した高さだけが出ます。案内・自動撮影はなく、シャッターを押すたびに 1 枚撮ります（枚数の上限なし）。基準（底の中心・円柱）もマスクも作りません。写真ごとに記録する向きは、カメラの見下ろす角度だけです（平面の作品と同じ測り方）。
+5. 確認画面で写真を見て「Mac へ送る」を押します。1 枚以上あれば送れます。足りない方向・切り抜きの表示はありません。
+6. Mac の `for_claude/<sessionId>/` には、`brief.md`（自由に撮った n 枚、向きの案内はしていない、どの写真がどの向きかは写真を見て判断する、写真ごとの見下ろす角度、入力した高さか「大きさは分かりません」）、`views/photo-01.jpg`…（撮った順にまっすぐに回した写真。16 枚まで）、`measurements.json`（`method: "freeCapture"`、大きさは写真から求めない、`declaredHeight`）、`pack.json`（`guidance: "free"`）が入ります。`overview.jpg`・`hull.obj` はありません。
+
+session.json の形は [docs/data-format.md](docs/data-format.md) の「自由に撮る撮影」です。
+
+## 撮影から AI に渡るまでの流れ（立体：`ai5`・向きで案内。設定で選ぶ）
+
+設定の「立体の撮り方」で「向きで案内」を選んだときの流れです。
 
 1. Mac で受信サーバーを起動します。ペアリングコード（6 桁）と接続先の URL が出ます。
 2. iPhone と Mac を同じネットワーク（自宅の Wi-Fi・USB ケーブル・iPhone のインターネット共有）につなぎ、アプリの「設定」で送り先（Bonjour の一覧か、URL の手入力）とペアリングコードを入れて「接続を確認」を押します。
@@ -41,7 +55,7 @@ session.json の形は [docs/data-format.md](docs/data-format.md) が正です�
 6. 撮るたびに、iPhone が方向ごとの代表の写真の画面の中心の線から作品の中心を求め、机の面（ARKit の平面か特徴点）が測れれば底の高さも決めて session.json に書きます。切り抜きができると、おおよその大きさも求めます。確認画面には、入力した高さ（入れたとき）、求めた位置（線の外れ）と大きさ（おおよそ・信頼度）が出ます。写真と切り抜きを見て、「送信」を押します。入力した高さは、写真から求めた大きさより優先するよう `brief.md`・`measurements.json`（`declaredHeight`）で AI に伝えます（求めた大きさは書き換えない）。
 7. Mac では、完了したセッションが `captures/sessions/<sessionId>/` に入り、続けて `captures/for_claude/<sessionId>/` が作られます（`tools/claude-pack` を release でビルドしてあるときだけ）。AI エージェントの入口は **`captures/for_claude/<sessionId>/brief.md`** です。
 
-前の方法（設定の「立体の撮り方の案内」で「底の中心と円柱で案内」）では、4 の前に底の中心に印を合わせて「ここが底の中心」を押し、円柱のガイドの高さと半径を作品に合わせ、「基準を確定」を押します。印は ARKit の平面（黄色）、机の特徴点から推定した高さ（水色）、iPhone の下端を机に当てて測った高さ（紫）の順に使います。「底の高さ ▼▲」で 0.5 cm ずつ直せます。撮る方向は同じで、方向は作品の位置から案内します。
+前の方法（設定の「立体の撮り方」で「底の中心と円柱で案内」）では、4 の前に底の中心に印を合わせて「ここが底の中心」を押し、円柱のガイドの高さと半径を作品に合わせ、「基準を確定」を押します。印は ARKit の平面（黄色）、机の特徴点から推定した高さ（水色）、iPhone の下端を机に当てて測った高さ（紫）の順に使います。「底の高さ ▼▲」で 0.5 cm ずつ直せます。撮る方向は同じで、方向は作品の位置から案内します。
 
 session.json の形（`guidance`・`referenceFrames[].heading`・`photos[].heading`）は [docs/data-format.md](docs/data-format.md) の「向きで案内する撮影」です。
 
@@ -49,7 +63,7 @@ session.json の形（`guidance`・`referenceFrames[].heading`・`photos[].headi
 
 1〜2 は立体と同じです。
 
-3. 「新しく撮る」で作品名を入れ、**「平面（絵・貼り絵など）」** を選びます。画面には見分ける手がかり（横から見るとほぼ紙だけの物）を出しますが、決めるのは撮る人です。続けて **「紙の大きさ」** を一覧（八つ切・四つ切・A4・B4・A3・B5）から選びます（既定は「わからない」。session.json の `declaredSize.sheet` になる）。
+3. 「新しく撮る」で作品名を入れ、**「平面（絵・貼り絵など）」** を選びます。画面には見分ける手がかり（横から見るとほぼ紙だけの物）を出しますが、決めるのは撮る人です。続けて **「紙の大きさ」** を一覧（八つ切・四つ切・A4・B4・A3・B5）から選びます（既定は「わからない」。session.json の `declaredSize.sheet` になる）。一覧に無い紙は **「その他（大きさを入力）」** を選び、縦と横を cm で入れます（どちらも 1〜300 cm のときだけ使い、`id` は `custom`。外れた値・空なら紙は選んでいない扱いで、橙の注意が出る）。
 4. 底の中心・円柱の設定はありません。iPhone を作品の真上に持ち、紙の全体を画面に入れます。Vision（`VNDetectRectanglesRequest`）が見つけた紙の輪郭が画面に出ます（撮れる状態なら緑）。
 5. 輪郭が止まり、iPhone の傾きが 70° 以上（ほぼ真上）、紙が画面の端にかかっていないと、0.8 秒で自動で撮ります（自動撮影はオフにもできる）。シャッターはいつでも押せます（紙が見つからない・真上でないときも撮れる。撮ったあとに知らせる）。画面には選んだ紙（「紙：八つ切（選んだ大きさ）」）と、「1 / 1 撮りました」、紙が見つからない・端にかかっている・真上でない・（紙を選んでいないときは）測った大きさが出ます。
 6. 撮った高解像度の写真で紙を見つけ直し、ARKit の平面に四隅を当てて実寸を測り（平面が無ければ測った大きさは null。紙を選んでいれば問題として出さない）、遠近を直した画像（`rectified/<photoId>.jpg`）を作ります。縦横比は、選んだ紙があればその比（向きは四隅の辺の長さで決める）、無ければ測った実寸、それも無ければ四隅の辺の長さです。元の写真はそのまま保存します。マスクは作りません。
@@ -120,7 +134,7 @@ xcrun devicectl device install app --device <UDID> ios/DerivedData/Build/Product
 - 初めて署名するときは、Mac で codesign がキーチェーンの鍵を使う許可を求めます（Mac のログインのパスワードを入れて「常に許可」）。コマンドからだと `errSecInternalComponent` で止まることがあり、そのときは Xcode の ▶ で一度実行します。
 - iPhone で「信頼されていないデベロッパ」と出たら、「設定 > 一般 > VPN とデバイス管理」で自分の開発元を信頼します。
 - `devicectl` で iPhone が `unavailable` のときは入れられません。ケーブルでつなぎ直し、ロックを解除します。
-- 送信の流れは、`capture-e2e` で実機なしに確かめられます。8765 で動いている受信サーバーとは別のポートと一時フォルダで受信サーバーを立てて、`(cd ios/Packages/CaptureCore && swift run capture-e2e http://127.0.0.1:<port> <ペアリングコード>)` を実行します（受信サーバーの `--host 127.0.0.1 --no-bonjour --data-dir <一時フォルダ>`。`--fail-put-every N` で再送も確かめられる）。`--flat` を付けると、平面の作品の合成セッション（真上の写真 1 枚・紙の四隅・実寸・補正した画像）を、`--heading` を付けると、向きで案内した立体の合成セッション（箱を 5 方向から撮った写真・十字のまわりのマスク・撮ったあとに求めた中心と大きさ）を送ります（どちらも付けないと前の方法の立体）。`--flat` に `--sheet=yatsugiri` など（id は `SheetPreset`）を足すと選んだ紙を、`--heading` に `--height-cm=12` などを足すと入力した高さを `declaredSize` に付けます（付けなければ null）。受信サーバーは受け取るたびに release の `memoria-pack` を動かすので、続けて `for_claude/` も確かめられます。
+- 送信の流れは、`capture-e2e` で実機なしに確かめられます。8765 で動いている受信サーバーとは別のポートと一時フォルダで受信サーバーを立てて、`(cd ios/Packages/CaptureCore && swift run capture-e2e http://127.0.0.1:<port> <ペアリングコード>)` を実行します（受信サーバーの `--host 127.0.0.1 --no-bonjour --data-dir <一時フォルダ>`。`--fail-put-every N` で再送も確かめられる）。`--flat` を付けると、平面の作品の合成セッション（真上の写真 1 枚・紙の四隅・実寸・補正した画像）を、`--heading` を付けると、向きで案内した立体の合成セッション（箱を 5 方向から撮った写真・十字のまわりのマスク・撮ったあとに求めた中心と大きさ）を送ります（どちらも付けないと前の方法の立体）。`--flat` に `--sheet=yatsugiri` など（id は `SheetPreset`）を足すと選んだ紙を、`--heading` に `--height-cm=12` などを足すと入力した高さを `declaredSize` に付けます（付けなければ null）。`--free` を付けると、自由に撮った立体の合成セッション（写真 4 枚・基準もマスクも無し。`--height-cm` も使える）を送ります。受信サーバーは受け取るたびに release の `memoria-pack` を動かすので、続けて `for_claude/` も確かめられます。
 
 ## 決めたこと・分かったこと
 
@@ -151,6 +165,12 @@ xcrun devicectl device install app --device <UDID> ios/DerivedData/Build/Product
   - 優先順：平面の紙の大きさは 選んだ紙 → 測った実寸 → 分かりません。補正した画像の縦横比も選んだ紙を先に使います。立体の高さは、入力した値を写真から求めたおおよその大きさより優先するよう AI に伝えます（`brief.md`・`measurements.json` の `declaredHeight`）。求めた大きさは書き換えず、縮尺も掛けません。
   - 紙の縦・横の向きは session.json に書かず、使う側で四隅（補正した画像）の形から決めます（横が縦以上なら横が長い辺）。四隅が無ければ向きは決めません。
   - 紙の一覧は CaptureCore の `SheetPreset` の 1 か所です。受信サーバーは一覧に無い id も受け付けます（値の範囲だけを確かめる）。
+  - 一覧に無い紙は「その他」で縦と横を入力します（ユーザーが決めたもの）。記録は同じ `declaredSize.sheet` で、`id` は `custom`、長い辺・短い辺は入力の大きい方・小さい方。`SheetPreset` には入れず、表示名は「その他」（寸法が要る所では「その他（21.0 × 30.0 cm）」）。
+- **立体は自由に何枚でも撮るのを既定にする**（ユーザーが決めたもの）：案内つきの撮り方（向きで案内・底の中心と円柱）は撮る人には難しく、実機でも試せていなかったため、立体も平面と同じく「基準を作らない・マスクを作らない・向きはカメラの傾きだけ」の撮り方にし、案内も自動撮影もなくしました。どの写真がどの向きかは AI が写真を見て決めます。決めたこと：
+  - session.json の `guidance` に `"free"` を足し（今ある値は変えない）、撮る方向の一覧 `free`（方向 0 個）を足しました。方向が 0 個の一覧は `free` だけです。新しい立体のセッションの既定は `free` で、案内つきの撮り方は設定の「立体の撮り方」で選びます（そのときだけ「撮る方向」を使う）。設定に保存した値が無ければ `free` です（前に案内のしかたを選んで保存した人は、その値のまま）。
+  - 進み具合は 1 枚以上で「そろった」。枚数の上限なし、撮り直しは求めません。
+  - 実装は平面の作品（`FlatCaptureController`・`FlatCaptureView`・`FlatPack.swift`）を手本にし、用紙の検出・補正・実寸を除いた形です。写真の詳細は平面の作品の画面（`FlatPhotoDetailView`）を使います。
+  - `memoria-pack` は撮った順の写真（16 枚まで。多いときは均等に選ぶ）と `brief.md` だけを作り、大きさは写真から求めません。`overview.jpg` は、今の作り方が向きで並べるため作りません。
 - `ai5` の大きさは **おおよそ** です。使えるマスクが 8 枚未満では visual hull を作らず、前の方法では撮影のときに合わせた円柱の大きさを `status: "approximate"`・`confidence: "low"` で書きます。
 - **向きで案内する撮影**（ユーザーの案）：前の方法で人がつまずき、誤差も出ていたのは、撮る前に底の中心と円柱を合わせるところでした（位置と机の高さはずれやすく、iPhone の向きはとても正確）。そこで撮るときは向きだけで案内し、作品の位置・大きさは撮ったあとに写真から求めることにしました。作品が中央にあるかは撮る人が十字で合わせます（マスクは違う物を選ぶことがあるため、案内には使わない）。決めたこと：
   - 方法は session.json の `guidance`（後から足した項目。無ければ前の方法）に書き、今あるセッションは作ったときの方法のまま。向きの案内は `ai5` だけ（48 方向などは底の中心と円柱）。撮る方向の一覧・許容は `ai5` と同じ。
@@ -190,6 +210,11 @@ xcrun devicectl device install app --device <UDID> ios/DerivedData/Build/Product
   - 距離の目安（「少し近づいて・離れて」）がうるさくないか。
   - 確認画面に出る中心の線の外れ（2 cm 以下が目安）と、おおよその大きさが実物に近いか（角ばった物と丸い物の両方で）。机の面が見つかるか（白い机）。
   - 十字のまわりの切り抜き（短い辺の 0.7 倍の正方形）で、作品が大きい・小さいときに Vision が作品を選ぶか。
+- **自由に撮る撮影（`guidance: "free"`）と紙の「その他」は、実機でもビルドでも確かめていません。** 作ったときの環境には Swift のコンパイラも Xcode も無く、CaptureCore・アプリ（`FreeCaptureController`・`FreeCaptureView` など）・`memoria-pack`（`FreePack.swift`）・`capture-e2e --free` は、コンパイルもテストの実行もしていません（足した Swift のテストも未実行）。確かめたのは受信サーバーと MCP サーバーの Python のテストだけです。Mac で確かめること：
+  - `swift test`（CaptureCore・claude-pack）と、アプリの `xcodebuild`（署名なし）が通るか。
+  - `capture-e2e --free --height-cm=8` から受信サーバー・`memoria-pack`・MCP までの流れ。
+  - 実機：設定の「立体の撮り方」（自由に撮るが既定。自由に撮るときは「撮る方向」が使えない表示）、自由に撮る撮影画面（シャッター・枚数・目安の文・入力した高さ）、確認画面・写真の詳細・送信で、方向・基準・マスクの表示や警告が出ないこと、新しいセッションの「その他」の縦と横の入力と注意。
+  - 前のアプリで「案内のしかた」を選んで保存していた端末では、その値が残り、自由に撮るにならない（設定で選び直す）。
 - **選んだ紙・入力した高さ（`declaredSize`）は、実機でもビルドでも確かめていません。** 作ったときの環境には Swift のコンパイラも Xcode も無く、CaptureCore・アプリ・`memoria-pack`・`capture-e2e` の Swift の変更は、コンパイルもテストの実行もしていません（足した Swift のテストも未実行）。確かめたのは受信サーバーと MCP サーバーの Python のテストだけです。Mac で確かめること：
   - `swift test`（CaptureCore・claude-pack）と、アプリの `xcodebuild`（署名なし）が通るか。
   - `capture-e2e --flat --sheet=yatsugiri` と `--heading --height-cm=12` から受信サーバー・`memoria-pack`・MCP までの流れ。

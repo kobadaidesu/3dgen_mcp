@@ -57,7 +57,9 @@ CHUNK_SIZE = 1024 * 1024
 MASK_FILE_STATUSES = ("candidate", "confirmed")
 WORK_KINDS = ("object", "flat")  # session.json "workKind" (added later; missing or null = "object")
 # session.json "guidance" (added later): how 3D work was guided. Missing or null = "baseCylinder" for 3D work, none for flat.
-GUIDANCES = ("heading", "baseCylinder")
+# "free" (added later): shot freely without guidance; its directionPlan is "free" with no targets, no reference frames, no masks.
+GUIDANCES = ("heading", "baseCylinder", "free")
+FREE_PLAN_ID = "free"
 DERIVATION_STATUSES = ("ok", "lowConfidence", "unknown")
 # session.json "declaredSize" (added later): the size the person picked or typed in (not measured). Missing or null = not entered.
 # Sheets of the app's list (CaptureCore SheetPreset): id -> (Japanese name, short side mm, long side mm).
@@ -65,6 +67,8 @@ SHEET_PRESETS = {
     "yatsugiri": ("八つ切", 271, 392), "yotsugiri": ("四つ切", 392, 542), "a4": ("A4", 210, 297),
     "b4": ("B4", 257, 364), "a3": ("A3", 297, 420), "b5": ("B5", 182, 257),
 }
+CUSTOM_SHEET_ID = "custom"  # 「その他」: the person typed both sides (1–300 cm)
+CUSTOM_SHEET_NAME = "その他"
 DECLARED_HEIGHT_RANGE_M = (0.005, 3.0)  # the app accepts 0.5–300 cm
 DECLARED_SHEET_SIDE_RANGE_M = (0.01, 3.0)
 AUTH_FAIL_LIMIT = 20  # failed tokens per client IP within AUTH_FAIL_WINDOW -> 429
@@ -328,6 +332,7 @@ def validate_session(path: Path, session_id: str, manifest_paths):
     if guidance is not None and guidance not in GUIDANCES:
         errors.append("guidance は %s のどれか（または無し）であるべきです（%r）" % (" / ".join(GUIDANCES), guidance))
     errors.extend(validate_declared_size(data.get("declaredSize")))
+    errors.extend(validate_direction_plan(data.get("directionPlan"), guidance))
     frames = data.get("referenceFrames")
     if isinstance(frames, list):
         for i, frame in enumerate(frames):
@@ -408,6 +413,26 @@ def validate_flat(flat, label: str, pid: str, manifest_paths):
     return errors
 
 
+def validate_direction_plan(plan, guidance):
+    """A plan without targets is allowed only for free capture (guidance "free", plan id "free"); free capture needs it."""
+    if not isinstance(plan, dict):
+        return []
+    targets = plan.get("targets")
+    errors = []
+    if isinstance(targets, list) and not targets and guidance != "free":
+        errors.append("directionPlan.targets が空なのは、自由に撮ったセッション（guidance free）だけです")
+    if guidance == "free" and (plan.get("id") != FREE_PLAN_ID or targets != []):
+        errors.append("自由に撮ったセッション（guidance free）の directionPlan は id free・targets [] であるべきです（%r）" % plan.get("id"))
+    return errors
+
+
+def sheet_name(sheet_id) -> str:
+    """Japanese name of a declared sheet id: the app's list, 「その他」 for typed-in sizes, else the id itself."""
+    if sheet_id == CUSTOM_SHEET_ID:
+        return CUSTOM_SHEET_NAME
+    return SHEET_PRESETS.get(sheet_id, (str(sheet_id),))[0]
+
+
 def validate_declared_size(declared):
     """declaredSize (added later): null/missing is fine. sheet is null or {id, longSideM, shortSideM} with a non-empty id
     and sides in range (long >= short); heightM is null or 0.005–3 m. Unknown sheet ids are accepted (future lists)."""
@@ -445,7 +470,7 @@ def declared_size_text(session) -> "str | None":
     parts = []
     sheet = declared.get("sheet")
     if isinstance(sheet, dict) and _is_num(sheet.get("longSideM")) and _is_num(sheet.get("shortSideM")):
-        name = SHEET_PRESETS.get(sheet.get("id"), (sheet.get("id"),))[0]
+        name = sheet_name(sheet.get("id"))
         parts.append("紙 %s（%.1f × %.1f cm、id %s）" % (name, sheet["shortSideM"] * 100, sheet["longSideM"] * 100, sheet.get("id")))
     height = declared.get("heightM")
     if _is_num(height):
@@ -1287,7 +1312,8 @@ def connect_urls(addresses, port: int, allow_remote: bool = False):
 
 
 KIND_LABELS = {"object": "立体", "flat": "平面"}
-GUIDANCE_LABELS = {"heading": "向きで案内", "baseCylinder": "底の中心と円柱で案内"}
+GUIDANCE_LABELS = {"heading": "向きで案内", "baseCylinder": "底の中心と円柱で案内", "free": "自由に撮る"}
+GUIDANCE_SHORT = {"heading": "・向き", "free": "・自由"}
 
 
 def cmd_list(args) -> int:
@@ -1301,7 +1327,7 @@ def cmd_list(args) -> int:
         print("%-36s  %-6s  %5s  %-28s  %-25s  %s" % ("sessionId", "種類", "写真", "マスク", "受信", "タイトル"))
         for s in sessions:
             masks = ", ".join("%s=%d" % kv for kv in (s.get("maskCount") or {}).items()) or "-"
-            kind = KIND_LABELS.get(s.get("workKind") or "object", "立体") + ("・向き" if s.get("guidance") == "heading" else "")
+            kind = KIND_LABELS.get(s.get("workKind") or "object", "立体") + GUIDANCE_SHORT.get(s.get("guidance"), "")
             print("%-36s  %-6s  %5s  %-28s  %-25s  %s" % (s.get("sessionId"), kind, s.get("photoCount"), masks,
                                                           s.get("receivedAt") or "-", s.get("title") or ""))
     incoming = scan_incoming(data_dir)
@@ -1432,9 +1458,9 @@ iPhone のアプリから同じネットワーク（自宅の LAN・USB ケー�
 
 | 場所 | 中身 | 使ってよいか |
 |---|---|---|
-| `for_claude/<sessionId>/` | AI ツール向けの入力（`brief.md`・`overview.jpg`・`views/`・`measurements.json`・`hull.obj`・`pack.json`。平面の作品は `overview.jpg`・`hull.obj` なし）。受信のたびに `tools/claude-pack` の `memoria-pack` が作り直す（ビルドしてあるときだけ） | **AI ツールの入口はここ**。読むだけ（作り直すと置き換わる） |
+| `for_claude/<sessionId>/` | AI ツール向けの入力（`brief.md`・`overview.jpg`・`views/`・`measurements.json`・`hull.obj`・`pack.json`。平面の作品と自由に撮った立体は `overview.jpg`・`hull.obj` なし）。受信のたびに `tools/claude-pack` の `memoria-pack` が作り直す（ビルドしてあるときだけ） | **AI ツールの入口はここ**。読むだけ（作り直すと置き換わる） |
 | `sessions/<sessionId>/` | 全部のファイルが届き、ハッシュと session.json を確かめ終わったセッション | 元のデータ。**書き込まない**（計算に使うのはここだけ） |
-| `index.json` | `sessions/` の一覧（sessionId・title・workKind（object＝立体・flat＝平面）・guidance（立体の撮り方の案内：heading＝向き・baseCylinder＝底の中心と円柱。平面は null）・photoCount・maskCount（mask.status ごとの数）・receivedAt・manifestHash・path） | 一覧を見るのに使う |
+| `index.json` | `sessions/` の一覧（sessionId・title・workKind（object＝立体・flat＝平面）・guidance（立体の撮り方：free＝自由に撮る・heading＝向きで案内・baseCylinder＝底の中心と円柱。平面は null）・photoCount・maskCount（mask.status ごとの数）・receivedAt・manifestHash・path） | 一覧を見るのに使う |
 | `incoming/` | 転送の途中。ファイルが欠けていたり、確かめる前だったりする | **使わない・読まない・消さない**（受信サーバーが使う） |
 | `replaced/<sessionId>-<UTC 時刻>/` | 同じセッションを撮り直して送り直したときの前の版 | 前の版が要るときだけ |
 | `.receiver.json` | 受信機の ID とペアリングコード | 触らない（秘密の値を含む） |
@@ -1452,7 +1478,7 @@ hull.obj            粗い形（visual hull を作れたときだけ。メート
 pack.json           写真の選び方・出どころ（sessionId・manifestHash）
 ```
 
-向き：AI 用 5 方向（ai5）のセッションは front・right・back・left・top（真上）。ほかは front・front_right・right・back_right・back・back_left・left・front_left（低い段）、top（一番高い写真）、front_high。
+向き：AI 用 5 方向（ai5）のセッションは front・right・back・left・top（真上）。自由に撮ったセッション（guidance free）は photo-01・photo-02…（撮った順。多いときは 16 枚まで）で、どれがどの向きかは写真を見て決める。ほかは front・front_right・right・back_right・back・back_left・left・front_left（低い段）、top（一番高い写真）、front_high。
 平面の作品（session.json の `workKind` が `flat`。絵・貼り絵などを真上から 1 枚）は `views/artwork.jpg`（遠近を直してまっすぐにした絵。直せなかったときは写真をまっすぐに回したもの）と、補正したときは `views/photo.jpg`（元の写真をまっすぐに回したもの）。3D の形を作る必要はなく、絵を板や額の表面に貼る形で使えます。
 手で作り直すときは `tools/claude-pack/.build/release/memoria-pack <sessionId の先頭> --force`（背景を透明にした `views/<向き>_cutout.png` も要るときは `--cutouts`）。
 
@@ -1471,8 +1497,9 @@ upright/masks/<photoId>.png    同じくマスクの表示用コピー
 - `session.json` の `photos[]` の 1 つが 1 枚の写真です。`photos[].photoId` → `photos/<photoId>.jpg`（`image.file`）。
 - マスクは `photos[].mask.status` が `candidate`（自動で選んだ・未確定）か `confirmed`（ユーザーが確認）のときだけ `masks/<photoId>.png`（`mask.file`）があります。ほかの status（`notGenerated`・`processing`・`failed`・`noObject`）ではマスクはありません。
 - 向きで案内したセッション（`guidance` が `heading`）は、撮るときに底の中心・円柱を決めていません。作品の中心・作品座標（`objectToWorld`）・写真ごとの方位と仰角・おおよその大きさは、撮ったあとに写真の中心の線と切り抜きから求めた値で、`referenceFrames[].heading.derivation` に求め方と線の外れ方（残差）があります。机の高さが分からないときは `basePointWorld` が null で、`objectToWorld` の原点は求めた中心です。
+- 自由に撮ったセッション（`guidance` が `free`。立体の作品を案内なしで何枚でも撮ったもの）は、撮る方向の一覧が `free`（方向は 0 個）で、基準（`referenceFrames`）もマスクもありません。写真ごとの `direction` は見下ろす角度（`elevationDeg`。カメラの光軸が水平から下へ傾いた角度）だけで、方位・距離・`targetId` は null です。どの写真がどの向きかは記録していないので、写真を見て決めます。
 - 平面の作品（`workKind` が `flat`）はマスクを作りません。`photos[].flat` に、用紙の四隅（`corners`。元写真のピクセル。無ければ null）・ARKit の平面で測った実寸（`size`。測れなければ null）・補正した画像（`rectified`）が入ります。
-- `declaredSize`（後から足した項目。無い・null は「入力していない」）は、撮る人が新しいセッションで選んだ・入力した大きさです（AR で測った値ではない）。平面の作品は `declaredSize.sheet`（一覧から選んだ紙：`id`（`yatsugiri` 八つ切・`yotsugiri` 四つ切・`a4`・`b4`・`a3`・`b5`）・`longSideM`・`shortSideM`。縦・横の向きは書かず、写真の中の紙の形で決める）、立体の作品は `declaredSize.heightM`（入力した高さ）。**選んだ・入力した値があれば、測った値・写真から求めた値より優先します**（紙の大きさ：`declaredSize.sheet` → `photos[].flat.size` → 分からない。立体の高さ：`declaredSize.heightM` を、求めたおおよその大きさより優先する。求めた大きさは書き換えない）。
+- `declaredSize`（後から足した項目。無い・null は「入力していない」）は、撮る人が新しいセッションで選んだ・入力した大きさです（AR で測った値ではない）。平面の作品は `declaredSize.sheet`（一覧から選んだ紙：`id`（`yatsugiri` 八つ切・`yotsugiri` 四つ切・`a4`・`b4`・`a3`・`b5`、撮る人が縦と横を入力した「その他」は `custom`）・`longSideM`・`shortSideM`。縦・横の向きは書かず、写真の中の紙の形で決める）、立体の作品は `declaredSize.heightM`（入力した高さ）。**選んだ・入力した値があれば、測った値・写真から求めた値より優先します**（紙の大きさ：`declaredSize.sheet` → `photos[].flat.size` → 分からない。立体の高さ：`declaredSize.heightM` を、求めたおおよその大きさより優先する。求めた大きさは書き換えない）。
 - カメラの姿勢 `camera.cameraToWorld`、内部パラメータ `camera.intrinsics`（K）、方向 `direction` は写真ごとです。`direction.confirmed` が false の写真の方向は参考値です。
 - 別の `referenceFrameId` の写真どうしの姿勢は比べられません（同じ世界座標とは限らない）。
 

@@ -49,7 +49,7 @@ public enum MaskRetakePolicy: String, Equatable, Sendable {
 extension DirectionPlan {
     /// この一覧の撮り直しの決まり（ai5 は lenient、flat1 は notUsed、ほかは strict）。変えるときはここだけ。
     public var retakePolicy: MaskRetakePolicy {
-        if isFlat { return .notUsed }
+        if isFlat || isFree { return .notUsed }
         return id == DirectionPlanPreset.ai5.rawValue ? .lenient : .strict
     }
 }
@@ -260,10 +260,14 @@ public struct Readiness: Equatable, Sendable {
     public var pendingMaskCount: Int
     /// 平面の作品のセッション（`workKind` が `flat`）。方向の代わりに「写真」と数え、基準は使わない。
     public var isFlat: Bool = false
+    /// 自由に撮るセッション（`guidance` が `free`）。方向は無く、写真が 1 枚以上あればそろった（枚数の上限なし）。
+    public var isFree: Bool = false
+    /// 写真の枚数（自由に撮るセッションの「そろった」に使う）。
+    public var photoCount: Int = 0
 
     public var doneCount: Int { progress.doneCount }
     public var totalCount: Int { progress.totalCount }
-    public var isComplete: Bool { progress.isComplete }
+    public var isComplete: Bool { isFree ? photoCount > 0 : progress.isComplete }
 
     public func issues(for photoId: String) -> [PhotoIssue] { issues[photoId] ?? [] }
 
@@ -281,6 +285,7 @@ public struct Readiness: Equatable, Sendable {
     /// 置き換え済みは基準ごとに決める。`pendingPhotoIds` は順番待ちのマスク（まだ `processing` になっていない）。
     public static func make(session: CaptureSession, pendingPhotoIds: Set<String> = []) -> Readiness {
         if session.isFlat { return makeFlat(session: session) }
+        if session.usesFreeCapture { return makeFree(session: session) }
         let lastId = session.referenceFrames.last?.id
         let progress = Coverage.progress(in: session, referenceFrameId: lastId)
         var superseded = Set<String>()
@@ -330,8 +335,20 @@ public struct Readiness: Equatable, Sendable {
         return Readiness(referenceFrameId: nil, progress: progress, issues: issues, pendingMaskCount: 0, isFlat: true)
     }
 
+    /// 自由に撮る：写真が 1 枚以上あればそろった。方向・マスク・置き換え済みは無い。気になる写真は、
+    /// 方向（傾き）が参考値の写真だけ（送るのは止めない）。
+    static func makeFree(session: CaptureSession) -> Readiness {
+        var issues: [String: [PhotoIssue]] = [:]
+        for photo in session.photos where !photo.direction.confirmed {
+            issues[photo.photoId] = [.directionUnconfirmed]
+        }
+        return Readiness(referenceFrameId: nil, progress: .empty(plan: session.directionPlan), issues: issues, pendingMaskCount: 0,
+                         isFree: true, photoCount: session.photos.count)
+    }
+
     /// 1 行の要約（例：「方向 8/8 そろいました」「方向 6/8・撮り直し 2」）。
     public var directionSummary: String {
+        if isFree { return photoCount > 0 ? "写真 \(photoCount) 枚（自由に撮影）" : "まだ写真がありません（1 枚以上で送れます）" }
         if totalCount == 0 { return "撮る方向がありません" }
         if isFlat { return isComplete ? "真上の写真 \(doneCount)/\(totalCount) そろいました" : "真上の写真 \(doneCount)/\(totalCount)" }
         if isComplete { return "方向 \(doneCount)/\(totalCount) そろいました" }
