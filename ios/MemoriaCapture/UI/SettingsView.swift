@@ -105,6 +105,26 @@ struct SettingsView: View {
                 Text("立体の作品の新しいセッションから使われます。今あるセッションは、作ったときの方向のままです。平面の作品は、いつも真上から 1 枚です。")
             }
 
+            if settings.planPreset == .ai5 {
+                Section {
+                    Picker("案内のしかた", selection: $settings.guidance) {
+                        ForEach(CaptureGuidance.allCases.reversed()) { option in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option.displayName)
+                                Text(option.summary).font(.caption).foregroundStyle(.secondary)
+                            }
+                            .tag(option)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } header: {
+                    Text("立体の撮り方の案内")
+                } footer: {
+                    Text("向きで案内する方法は新しく、まだ試しているところです。AI 用 5 方向のときだけ使えます（ほかの方向はいつも底の中心と円柱）。今あるセッションは、作ったときの方法のままです。")
+                }
+            }
+
             Section {
                 Toggle("自動撮影", isOn: $settings.autoCaptureEnabled)
             } header: {

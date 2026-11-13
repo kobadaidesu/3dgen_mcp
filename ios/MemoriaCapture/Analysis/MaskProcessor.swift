@@ -160,6 +160,14 @@ final class MaskProcessor: @unchecked Sendable {
             status: .candidate, width: result.width, height: result.height, method: MaskInfo.visionMethod,
             instanceCount: count, selectedInstances: selected, selection: selection, check: result.check
         ).recording(plan))
+        // 向きで案内したセッション：選び直した切り抜きで大きさを求め直す（HeadingSizeService が切り抜きの変化を受けて求める）。
+        if selection == .user {
+            _ = try? store.updateSession(sessionId) { s in
+                for i in s.referenceFrames.indices where s.referenceFrames[i].heading?.derivation?.size?.photoIds.contains(photo.photoId) == true {
+                    s.referenceFrames[i].heading?.derivation?.size = nil
+                }
+            }
+        }
     }
 
     // MARK: 確認画面から

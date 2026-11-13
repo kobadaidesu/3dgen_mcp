@@ -426,11 +426,13 @@ struct ShutterButton: View {
 /// 6 つの確認項目（トラッキング・収まり・方向・動き・暗さ・ブレ）。
 struct StatusChips: View {
     let assessment: QualityAssessment
+    /// 出さない項目（向きの案内では「収まり」を撮る人が十字で合わせるので出さない）。
+    var hidden: Set<CheckKind> = []
 
     var body: some View {
         let columns = [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())]
         LazyVGrid(columns: columns, spacing: 6) {
-            ForEach(CheckKind.allCases, id: \.self) { kind in
+            ForEach(CheckKind.allCases.filter { !hidden.contains($0) }, id: \.self) { kind in
                 let check = assessment.check(kind)
                 HStack(spacing: 4) {
                     Image(systemName: Self.icon(check.status))

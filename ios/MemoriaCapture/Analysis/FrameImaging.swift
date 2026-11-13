@@ -49,13 +49,18 @@ enum SavedPhotoAnalyzer {
 
     /// 写真の姿勢で作品の円柱を投影した範囲（保存した画像のピクセル）。基準や大きさが無ければ nil。
     static func objectRegion(photo: Photo, session: CaptureSession, expandBy fraction: Double = 0.1) -> PixelRect? {
-        guard let reference = session.referenceFrame(id: photo.referenceFrameId), let object = session.object else { return nil }
+        // 向きで案内したセッション：作品の位置は撮るときには分からないので、十字のまわり（切り抜きと同じ正方形）。
+        if session.usesHeadingGuidance {
+            return MaskCropPlanner.crosshairPlan(imageWidth: photo.image.width, imageHeight: photo.image.height).region.rect
+        }
+        guard let reference = session.referenceFrame(id: photo.referenceFrameId), let base = reference.basePointWorld?.simd,
+              let object = session.object else { return nil }
         let k = photo.camera.intrinsicsResolution
         let camera = CameraModel(
             cameraToWorld: photo.camera.cameraToWorld.simd, intrinsics: photo.camera.intrinsics.simd,
             imageWidth: Double(k.width), imageHeight: Double(k.height)
         )
-        let cylinder = ObjectCylinder(basePoint: reference.basePointWorld.simd, radiusM: object.radiusM, heightM: object.heightM)
+        let cylinder = ObjectCylinder(basePoint: base, radiusM: object.radiusM, heightM: object.heightM)
         let result = Projection.evaluate(cylinder: cylinder, camera: camera)
         guard let box = result.boundingBox else { return nil }
         // K の画像と保存した画像の大きさが違うときは、保存した画像に合わせる。

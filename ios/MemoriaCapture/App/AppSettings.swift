@@ -17,6 +17,8 @@ final class AppSettings: ObservableObject {
     @Published var planPreset: DirectionPlanPreset { didSet { defaults.set(planPreset.rawValue, forKey: Keys.planPreset) } }
     /// 条件がそろったら自動で撮る。
     @Published var autoCaptureEnabled: Bool { didSet { defaults.set(autoCaptureEnabled, forKey: Keys.autoCapture) } }
+    /// 新しい立体の作品のセッションの案内のしかた（向きで案内・底の中心と円柱）。向きの案内は AI 用 5 方向のときだけ使う。
+    @Published var guidance: CaptureGuidance { didSet { defaults.set(guidance.rawValue, forKey: Keys.guidance) } }
 
     /// 判定のしきい値（既定値のまま。変えるときは CaptureCore の QualityThresholds）。
     let thresholds = QualityThresholds.default
@@ -27,6 +29,7 @@ final class AppSettings: ObservableObject {
         static let pairingCode = "pairingCode"
         static let planPreset = "planPreset"
         static let autoCapture = "autoCapture"
+        static let guidance = "guidance"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -38,6 +41,7 @@ final class AppSettings: ObservableObject {
         let stored = defaults.string(forKey: Keys.planPreset).flatMap(DirectionPlanPreset.init(rawValue:)) ?? .default
         planPreset = stored == .flat1 ? .default : stored
         autoCaptureEnabled = defaults.object(forKey: Keys.autoCapture) as? Bool ?? true
+        guidance = defaults.string(forKey: Keys.guidance).flatMap(CaptureGuidance.init(rawValue:)) ?? .default
     }
 
     var receiverURL: URL? { TransferClient.receiverURL(fromUserInput: receiverURLString) }

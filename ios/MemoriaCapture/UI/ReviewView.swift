@@ -157,8 +157,13 @@ struct ReviewView: View {
             if let readiness {
                 ReadinessView(readiness: readiness)
             }
+            if session.usesHeadingGuidance {
+                HeadingDerivationSummary(session: session)
+            }
             Text(session.isFlat
                  ? "✓ は真上から撮った写真です。紙が見つかった写真は、遠近を直した画像を出しています。「置き換え済み」は撮り直す前の写真です（送ると Mac では一番新しい真上の写真を使います）。"
+                 : session.usesHeadingGuidance
+                 ? "✓ は方向が確定した写真、「参考」は方向が参考値の写真です。「前の基準」は正面からやり直す前（撮影画面を開き直す前）に撮った写真です。「向きの外」は狙った向きの外か、その場で回して撮った写真です。"
                  : "✓ は方向が確定した写真、「参考」は方向が参考値の写真です。「前の基準」は基準を設定し直す前に撮った写真です。「置き換え済み」は同じ方向をあとで撮り直した写真です。")
                 .font(.caption).foregroundStyle(.secondary)
         }
@@ -317,8 +322,8 @@ struct PhotoCell: View {
         if let target = session.directionPlan.target(id: photo.direction.targetId) {
             return session.directionPlan.displayName(of: target)
         }
-        if let az = photo.direction.azimuthDeg {
-            return "\(Int(az.rounded()))°（追加）"
+        if let az = photo.heading?.relativeHeadingDeg ?? photo.direction.azimuthDeg {
+            return photo.heading != nil ? "向きの外 \(Int(az.rounded()))°" : "\(Int(az.rounded()))°（追加）"
         }
         return "方向なし"
     }
@@ -413,5 +418,39 @@ struct MaskBadge: View {
         case .failed: return .red
         case .noObject: return .orange
         }
+    }
+}
+
+/// 向きで案内したセッションの、撮ったあとに求めた中心と大きさ（最後の基準）。
+struct HeadingDerivationSummary: View {
+    let session: CaptureSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label(centerText, systemImage: "scope")
+            Label(sizeText, systemImage: "ruler")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+
+    private var derivation: HeadingDerivation? {
+        session.referenceFrames.last { $0.heading?.frontHeadingDeg != nil }?.heading?.derivation
+    }
+
+    private var centerText: String {
+        guard let d = derivation else { return "作品の位置：横の写真を撮ると求めます" }
+        guard d.centerWorld != nil else { return "作品の位置：分かりません（写真が足りない・線がほぼ平行）" }
+        let miss = d.residualRmsM.map { String(format: "線の外れ %.1f cm", $0 * 100) } ?? ""
+        let base = d.origin == .base ? "・机の面あり" : "・机の高さは分からない"
+        return "作品の位置：写真 \(d.photoIds.count) 枚から求めました（\(miss)\(d.status == .ok ? "" : "・当てにしにくい")\(base)）"
+    }
+
+    private var sizeText: String {
+        guard let d = derivation, d.centerWorld != nil else { return "大きさ：位置が分かると求めます" }
+        guard let size = d.size else { return "大きさ：切り抜きができたら求めます" }
+        guard size.isKnown, let w = size.widthM, let dep = size.depthM, let h = size.heightM else { return "大きさ：分かりません（切り抜きが足りない）" }
+        let confidence = size.confidence == "low" ? "・信頼度 低" : ""
+        return String(format: "大きさ（おおよそ）：幅 %.1f × 奥行き %.1f × 高さ %.1f cm", w * 100, dep * 100, h * 100) + confidence
     }
 }

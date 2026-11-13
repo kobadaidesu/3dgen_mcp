@@ -34,6 +34,8 @@ final class AppModel: ObservableObject {
     let store: SessionStore
     let masks: MaskProcessor
     let transfer: TransferCoordinator
+    /// 向きで案内したセッションの、撮ったあとの中心と大きさ（切り抜きができたら求める）。
+    let headingSizes: HeadingSizeService
 
     @Published var path: [Route] = []
     @Published private(set) var sessions: [SessionSummary] = []
@@ -51,7 +53,13 @@ final class AppModel: ObservableObject {
         self.store = store
         masks = MaskProcessor(store: store, thresholds: settings.thresholds)
         transfer = TransferCoordinator(store: store, settings: settings)
-        masks.onChange = { [weak self] _ in self?.sessionChanged() }
+        let headingSizes = HeadingSizeService(store: store)
+        self.headingSizes = headingSizes
+        masks.onChange = { [weak self] sessionId in
+            headingSizes.refresh(sessionId: sessionId)
+            self?.sessionChanged()
+        }
+        headingSizes.onChange = { [weak self] _ in self?.sessionChanged() }
         transfer.onChange = { [weak self] _ in self?.sessionChanged() }
         resumeUnfinishedMasks()
         reloadSessions()
@@ -102,11 +110,13 @@ final class AppModel: ObservableObject {
     /// 新しいセッション。作品の種類で撮り方が決まる（平面は真上から 1 枚、立体は設定の撮る方向）。
     func createSession(title: String, workKind: WorkKind) -> CaptureSession? {
         do {
+            let plan = DirectionPlanPreset.plan(for: workKind, objectPreset: settings.planPreset)
             let session = try store.createSession(
                 title: title.trimmingCharacters(in: .whitespacesAndNewlines),
                 device: DeviceInfoProvider.current(),
-                plan: DirectionPlanPreset.plan(for: workKind, objectPreset: settings.planPreset),
-                workKind: workKind
+                plan: plan,
+                workKind: workKind,
+                guidance: CaptureGuidance.resolve(preferred: settings.guidance, plan: plan, workKind: workKind)
             )
             sessionChanged()
             return session
@@ -142,6 +152,7 @@ final class AppModel: ObservableObject {
     private func resumeUnfinishedMasks() {
         store.recoverInterruptedMasks()
         for session in store.listSessions() {
+            if session.usesHeadingGuidance { headingSizes.refresh(sessionId: session.sessionId) }
             if session.isFlat {
                 for photo in session.photos where photo.quality.saved == nil {
                     masks.enqueue(sessionId: session.sessionId, photoId: photo.photoId)

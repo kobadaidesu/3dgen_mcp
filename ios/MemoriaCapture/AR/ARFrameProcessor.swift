@@ -52,6 +52,8 @@ struct LiveReference: Sendable {
     /// 撮り直しが要る方向（`covered` に入らない）。
     var retake: Set<String> = []
     var preferredTargetId: String?
+    /// 向きで案内するとき（guidance: heading）の正面と撮った写真の線。ほかの案内では nil（基準点・円柱を使う）。
+    var heading: HeadingLiveReference?
 }
 
 /// 撮影前の映像の解析の結果（メインスレッドへ渡す）。
@@ -107,7 +109,14 @@ final class ARFrameProcessor: NSObject, ARSessionDelegate, @unchecked Sendable {
                         self?.notAvailableSince = nil
                     }
                 }
-                if newValue.anchorId != _reference.anchorId || newValue.plan != _reference.plan || newValue.objectToWorld == nil {
+                let resetRoute: Bool
+                if let heading = newValue.heading {
+                    // 向きの案内：正面が変わったら（新しい基準）、歩いている向きも数え直す。
+                    resetRoute = heading.frontHeadingDeg != _reference.heading?.frontHeadingDeg || newValue.plan != _reference.plan
+                } else {
+                    resetRoute = newValue.anchorId != _reference.anchorId || newValue.plan != _reference.plan || newValue.objectToWorld == nil
+                }
+                if resetRoute {
                     // 基準（作品座標）が変わったら、歩いている向き・今の段も数え直す。
                     analysisQueue.async { [weak self] in self?.route.reset() }
                 }
@@ -177,6 +186,12 @@ final class ARFrameProcessor: NSObject, ARSessionDelegate, @unchecked Sendable {
             projection = Projection.evaluate(cylinder: cylinder, camera: cameraModel, thresholds: thresholds.inFrame)
         }
         let fullWidth = Double(resolution.width), fullHeight = Double(resolution.height)
+        // 向きの案内：画面の中心（十字）を通る線。明るさ・ピントは十字のまわり（中央の半分）で見る。
+        let centerRay = ref.heading.map { _ in
+            HeadingMath.centerRay(cameraToWorld: transform, intrinsics: simd_double3x3(fast: camera.intrinsics),
+                                  intrinsicsResolution: PixelSize(width: Int(fullWidth), height: Int(fullHeight)),
+                                  imageSize: PixelSize(width: Int(fullWidth), height: Int(fullHeight)))
+        }
         let roi = projection?.boundingBox?.expanded(by: 0.05).clamped(width: fullWidth, height: fullHeight)
             ?? PixelRect(x: fullWidth * 0.25, y: fullHeight * 0.25, width: fullWidth * 0.5, height: fullHeight * 0.5)
         // Y 面の縮小した写しだけを持ち出す（フレームとピクセルバッファは持たない）。
@@ -189,7 +204,17 @@ final class ARFrameProcessor: NSObject, ARSessionDelegate, @unchecked Sendable {
             guard let self else { return }
             let metrics = luma.flatMap { ImageMetrics.computeOnSamples($0) }
             var direction: DirectionContext?
-            if hasReference, let base = ref.basePoint {
+            var headingContext: HeadingContext?
+            if let heading = ref.heading, let centerRay {
+                let measured = heading.evaluate(ray: centerRay)
+                // ほぼ真上では向きが定まらないので、歩く向きには数えない（route が elevation を見て捨てる）。
+                self.route.update(azimuthDeg: measured.relativeHeadingDeg, elevationDeg: measured.pitchDeg, plan: ref.plan, covered: ref.covered)
+                headingContext = HeadingContext.make(
+                    relativeHeadingDeg: measured.relativeHeadingDeg, pitchDeg: measured.pitchDeg, hasFront: heading.hasFront,
+                    position: measured.position, plan: ref.plan, covered: ref.covered, preferredTargetId: ref.preferredTargetId,
+                    retake: ref.retake, route: self.route
+                )
+            } else if hasReference, let base = ref.basePoint {
                 let azimuth = ref.objectToWorld.map { Geometry.azimuth(cameraPosition: transform.translation, objectToWorld: $0) }
                 let elevation = Geometry.elevationAndDistance(cameraPosition: transform.translation, basePoint: base, heightM: ref.heightM).elevationDeg
                 // ほぼ真上では方位が定まらないので、歩く向きには数えない（route が elevation を見て捨てる）。
@@ -204,9 +229,10 @@ final class ARFrameProcessor: NSObject, ARSessionDelegate, @unchecked Sendable {
                 timestamp: t, trackingState: state, trackingReason: reason, reference: ref.state,
                 projection: projection, direction: direction, angularSpeed: angular, linearSpeed: linear,
                 meanLuma: metrics?.meanLuma, sharpness: metrics?.laplacianVariance,
-                ambientIntensity: ambient, exposureDuration: exposure
+                ambientIntensity: ambient, exposureDuration: exposure, heading: headingContext
             )
             let center = projection?.center.map { CGPoint(x: $0.x / fullWidth, y: $0.y / fullHeight) }
+                ?? (ref.heading != nil ? CGPoint(x: 0.5, y: 0.5) : nil)
             let analysis = LiveAnalysis(sample: sample, normalizedCenter: center)
             let handler = self.onAnalysis
             onMain { [weak self] in

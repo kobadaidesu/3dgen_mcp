@@ -4,7 +4,8 @@ import CaptureCore
 import SwiftUI
 
 /// 撮影画面：カメラの許可と AR の対応を確かめてから、AR の撮影を出す。
-/// 平面の作品（`workKind` が `flat`）は真上から 1 枚の撮影（`FlatCaptureView`）、立体は今までの撮影（`CaptureView`）。
+/// 平面の作品（`workKind` が `flat`）は真上から 1 枚の撮影（`FlatCaptureView`）、立体で向きで案内するセッション（`guidance` が `heading`）は
+/// `HeadingCaptureView`、それ以外の立体は底の中心と円柱で案内する撮影（`CaptureView`）。
 struct CaptureScreen: View {
     let sessionId: String
     let preferredTargetId: String?
@@ -27,6 +28,8 @@ struct CaptureScreen: View {
                 case .authorized:
                     if model.loadSession(sessionId)?.isFlat == true {
                         FlatCaptureView(sessionId: sessionId, model: model)
+                    } else if model.loadSession(sessionId)?.usesHeadingGuidance == true {
+                        HeadingCaptureView(sessionId: sessionId, preferredTargetId: preferredTargetId, model: model)
                     } else {
                         CaptureView(sessionId: sessionId, preferredTargetId: preferredTargetId, model: model)
                     }
