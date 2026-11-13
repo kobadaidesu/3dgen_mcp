@@ -43,7 +43,8 @@ final class SessionCodingTests: XCTestCase {
 
     func testTopLevelKeysAndValues() throws {
         let j = try json(exampleSession())
-        XCTAssertEqual(Set(j.keys), ["schema", "schemaVersion", "sessionId", "title", "workKind", "createdAt", "updatedAt", "conventions", "device", "object", "referenceFrames", "directionPlan", "photos"])
+        XCTAssertEqual(Set(j.keys), ["schema", "schemaVersion", "sessionId", "title", "workKind", "createdAt", "updatedAt", "conventions", "device", "object", "referenceFrames", "directionPlan", "photos", "guidance"])
+        XCTAssertTrue(j["guidance"] is NSNull)  // 後から足した項目。null（と無い）は前の方法（baseCylinder）
         XCTAssertEqual(j["schema"] as? String, "memoria.capture.session")
         XCTAssertEqual(j["workKind"] as? String, "object")  // 後から足した項目。いつも書く
         XCTAssertEqual(j["schemaVersion"] as? Int, 1)
@@ -66,7 +67,8 @@ final class SessionCodingTests: XCTestCase {
         var s = exampleSession()
         let j = try json(s)
         let ref = try XCTUnwrap((j["referenceFrames"] as? [[String: Any]])?.first)
-        XCTAssertEqual(Set(ref.keys), ["id", "createdAt", "basePointWorld", "objectToWorld", "frontPhotoId", "invalidatedAt", "invalidationReason", "object", "base"])
+        XCTAssertEqual(Set(ref.keys), ["id", "createdAt", "basePointWorld", "objectToWorld", "frontPhotoId", "invalidatedAt", "invalidationReason", "object", "base", "heading"])
+        XCTAssertTrue(ref["heading"] is NSNull)  // 向きで案内した基準だけ
         XCTAssertTrue(ref["object"] is NSNull)  // この項目より前の基準と同じ（セッションの object を使う）
         XCTAssertTrue(ref["base"] is NSNull)  // 基準点の求め方を記録する前の基準と同じ
         XCTAssertEqual(ref["basePointWorld"] as? [Double], [0.1, -0.7, -0.4])
@@ -92,8 +94,9 @@ final class SessionCodingTests: XCTestCase {
     func testPhotoKeysNullsAndMatrices() throws {
         let j = try json(exampleSession())
         let photo = try XCTUnwrap((j["photos"] as? [[String: Any]])?.first)
-        XCTAssertEqual(Set(photo.keys), ["photoId", "sequence", "capturedAt", "trigger", "referenceFrameId", "image", "camera", "direction", "quality", "mask", "flat"])
+        XCTAssertEqual(Set(photo.keys), ["photoId", "sequence", "capturedAt", "trigger", "referenceFrameId", "image", "camera", "direction", "quality", "mask", "flat", "heading"])
         XCTAssertTrue(photo["flat"] is NSNull)  // 立体の作品の写真
+        XCTAssertTrue(photo["heading"] is NSNull)  // 向きで案内した写真だけ
         let image = try XCTUnwrap(photo["image"] as? [String: Any])
         XCTAssertEqual(Set(image.keys), ["file", "format", "width", "height", "exifOrientation", "displayRotationDegClockwise", "deviceOrientation"])
         XCTAssertEqual(image["format"] as? String, "jpeg")

@@ -30,6 +30,8 @@ public enum MaskInputRegionSource: String, Codable, Sendable {
     case projectedCylinder
     /// 写真の全体（基準が無い・作品がカメラの後ろなどで投影できないとき）。
     case fullImage
+    /// 写真の中央（撮影画面の十字）のまわりの正方形。向きで案内したセッション（作品の位置も大きさも撮るときには分からない）。
+    case crosshair
 }
 
 /// 写真に投影した作品の円柱（保存した写真のピクセル）。
@@ -125,17 +127,51 @@ public enum MaskCropPlanner {
     /// 切り抜きの幅・高さの下限（ピクセル。写真より大きくはしない）。
     public static let minimumSide = 512
 
+    /// 向きで案内したセッションの切り抜き：写真の中央（十字）のまわりの正方形。辺は短い辺のこの割合。
+    public static let crosshairSideFraction = 0.7
+    /// 作品らしい物が見つからないときに、もう一度試す正方形（短い辺の割合）。
+    public static let crosshairRetrySideFraction = 0.45
+    /// 自動で選ぶとき・確かめるときの「十字のまわり」（切り抜きの中央の正方形、切り抜きの辺の割合）。
+    public static let crosshairFocusFraction = 0.3
+
+    /// 写真の中央（十字）のまわりの正方形の切り抜き（辺は短い辺の `sideFraction` 倍、`minimumSide` 以上）。
+    /// `object` には十字のまわりの正方形（切り抜きの辺の `crosshairFocusFraction` 倍）を入れる（自動で選ぶ物の目安。作品の輪郭ではない）。
+    public static func crosshairPlan(imageWidth: Int, imageHeight: Int, sideFraction: Double = crosshairSideFraction) -> MaskCropPlan {
+        guard imageWidth > 0, imageHeight > 0 else { return .fullImage(width: imageWidth, height: imageHeight) }
+        let short = min(imageWidth, imageHeight)
+        let side = min(short, max(minimumSide, Int((Double(short) * sideFraction).rounded())))
+        let x0 = (imageWidth - side) / 2, y0 = (imageHeight - side) / 2
+        let f = Double(side) * crosshairFocusFraction
+        let cx = Double(imageWidth) / 2, cy = Double(imageHeight) / 2
+        let focus = PixelRect(x: cx - f / 2, y: cy - f / 2, width: f, height: f)
+        let square = [SIMD2(focus.minX, focus.minY), SIMD2(focus.maxX, focus.minY), SIMD2(focus.maxX, focus.maxY), SIMD2(focus.minX, focus.maxY)]
+        return MaskCropPlan(region: PixelBox(x: x0, y: y0, width: side, height: side), source: .crosshair,
+                            imageWidth: imageWidth, imageHeight: imageHeight, object: ProjectedObject(boundingBox: focus, silhouette: square))
+    }
+
+    /// 向きで案内したセッションの試す順の切り抜き：`crosshairSideFraction`、次に `crosshairRetrySideFraction`。
+    public static func crosshairPlans(imageWidth: Int, imageHeight: Int) -> [MaskCropPlan] {
+        let first = crosshairPlan(imageWidth: imageWidth, imageHeight: imageHeight)
+        let retry = crosshairPlan(imageWidth: imageWidth, imageHeight: imageHeight, sideFraction: crosshairRetrySideFraction)
+        return retry.region == first.region ? [first] : [first, retry]
+    }
+
     /// 写真の姿勢で作品の円柱を投影する（保存した写真のピクセル）。基準・大きさが無い、作品がカメラの後ろなら nil。
+    /// 向きで案内したセッションは、撮ったあとに求めた箱（`heading.derivation.size`）を投影する（無ければ nil）。
     public static func projectObject(photo: Photo, session: CaptureSession) -> ProjectedObject? {
+        if let frame = session.referenceFrame(id: photo.referenceFrameId), frame.isHeading {
+            return projectDerivedBox(photo: photo, frame: frame)
+        }
         // 写真を撮ったときの基準の大きさを使う（基準を設定し直すとセッションの大きさは変わるため）。
         guard let reference = session.referenceFrame(id: photo.referenceFrameId),
+              let base = reference.basePointWorld?.simd,
               let size = session.objectSize(referenceFrameId: photo.referenceFrameId) else { return nil }
         let k = photo.camera.intrinsicsResolution
         let camera = CameraModel(
             cameraToWorld: photo.camera.cameraToWorld.simd, intrinsics: photo.camera.intrinsics.simd,
             imageWidth: Double(k.width), imageHeight: Double(k.height)
         )
-        let cylinder = ObjectCylinder(basePoint: reference.basePointWorld.simd, radiusM: size.radiusM, heightM: size.heightM)
+        let cylinder = ObjectCylinder(basePoint: base, radiusM: size.radiusM, heightM: size.heightM)
         // K の画像と保存した画像の大きさが違うときは、保存した画像に合わせる。
         let sx = Double(photo.image.width) / Double(max(1, k.width))
         let sy = Double(photo.image.height) / Double(max(1, k.height))
@@ -146,6 +182,29 @@ public enum MaskCropPlanner {
         guard camera.project(cylinder.center) != nil else { return nil }
         let points = cylinder.samplePoints(segments: 32).compactMap { camera.project($0) }.map { SIMD2($0.x * scaleX, $0.y * scaleY) }
         guard points.count >= 3 else { return nil }
+        let xs = points.map(\.x), ys = points.map(\.y)
+        let box = PixelRect(minX: xs.min()!, minY: ys.min()!, maxX: xs.max()!, maxY: ys.max()!)
+        guard !box.isEmpty else { return nil }
+        return ProjectedObject(boundingBox: box, silhouette: Polygon.convexHull(points))
+    }
+
+    /// 撮ったあとに求めた箱（向きで案内した基準）を写真に投影する。中心か大きさが分からない・カメラの後ろなら nil。
+    public static func projectDerivedBox(photo: Photo, frame: ReferenceFrame) -> ProjectedObject? {
+        guard let heading = frame.heading, let front = heading.frontHeadingDeg, let derivation = heading.derivation,
+              let center = derivation.centerWorld?.simd, let size = derivation.size, size.isKnown,
+              let lo = size.boxMinM?.simd, let hi = size.boxMaxM?.simd else { return nil }
+        let m = HeadingDeriver.objectToWorld(center: center, frontHeadingDeg: front, originY: center.y)
+        let k = photo.camera.intrinsicsResolution
+        let camera = CameraModel(cameraToWorld: photo.camera.cameraToWorld.simd, intrinsics: photo.camera.intrinsics.simd,
+                                 imageWidth: Double(k.width), imageHeight: Double(k.height))
+        let sx = Double(photo.image.width) / Double(max(1, k.width)), sy = Double(photo.image.height) / Double(max(1, k.height))
+        var points: [SIMD2<Double>] = []
+        for i in 0..<8 {
+            let p = SIMD4(i & 1 == 0 ? lo.x : hi.x, i & 2 == 0 ? lo.y : hi.y, i & 4 == 0 ? lo.z : hi.z, 1)
+            let w = m * p
+            guard let px = camera.project(SIMD3(w.x, w.y, w.z)) else { return nil }
+            points.append(SIMD2(px.x * sx, px.y * sy))
+        }
         let xs = points.map(\.x), ys = points.map(\.y)
         let box = PixelRect(minX: xs.min()!, minY: ys.min()!, maxX: xs.max()!, maxY: ys.max()!)
         guard !box.isEmpty else { return nil }
@@ -179,7 +238,8 @@ public enum MaskCropPlanner {
 
     /// session.json の値（基準・作品の大きさ・写真の姿勢と K）から決める。撮ったあとの写真でも同じ結果になる。
     public static func plan(photo: Photo, session: CaptureSession) -> MaskCropPlan {
-        plan(object: projectObject(photo: photo, session: session), imageWidth: photo.image.width, imageHeight: photo.image.height)
+        if session.usesHeadingGuidance { return crosshairPlan(imageWidth: photo.image.width, imageHeight: photo.image.height) }
+        return plan(object: projectObject(photo: photo, session: session), imageWidth: photo.image.width, imageHeight: photo.image.height)
     }
 
     /// 試す順の切り抜き：`marginFactor`、次に `retryMarginFactor`（同じ範囲になるなら省く）。投影できなければ全体だけ。
@@ -190,8 +250,10 @@ public enum MaskCropPlanner {
         return retry.region == first.region ? [first] : [first, retry]
     }
 
+    /// 写真の切り抜きの試す順。向きで案内したセッションは、撮ったあとも十字のまわり（`crosshairPlans`）。
     public static func plans(photo: Photo, session: CaptureSession) -> [MaskCropPlan] {
-        plans(object: projectObject(photo: photo, session: session), imageWidth: photo.image.width, imageHeight: photo.image.height)
+        if session.usesHeadingGuidance { return crosshairPlans(imageWidth: photo.image.width, imageHeight: photo.image.height) }
+        return plans(object: projectObject(photo: photo, session: session), imageWidth: photo.image.width, imageHeight: photo.image.height)
     }
 
     /// マスクを作ったときの切り抜き（`mask.inputRegion`・`inputRegionSource` の記録から）。記録が無い・写真に収まらないときは nil。
@@ -203,6 +265,11 @@ public enum MaskCropPlanner {
         case .projectedCylinder?:
             guard let r = photo.mask.inputRegion, r.x >= 0, r.y >= 0, r.width > 0, r.height > 0, r.maxX <= w, r.maxY <= h else { return nil }
             return MaskCropPlan(region: r, source: .projectedCylinder, imageWidth: w, imageHeight: h, object: projectObject(photo: photo, session: session))
+        case .crosshair?:
+            guard let r = photo.mask.inputRegion, r.x >= 0, r.y >= 0, r.width > 0, r.height > 0, r.maxX <= w, r.maxY <= h else { return nil }
+            var plan = crosshairPlan(imageWidth: w, imageHeight: h, sideFraction: Double(min(r.width, r.height)) / Double(max(1, min(w, h))))
+            plan.region = r
+            return plan
         case nil:
             return nil
         }

@@ -60,6 +60,9 @@ public struct CaptureSession: Codable, Equatable, Sendable {
     /// 作品の種類（新しいセッションを作るときにユーザーが選ぶ）。`object`（立体：工作・粘土など）| `flat`（平面：絵・貼り絵など）。
     /// 後から足した項目で、キーが無い（それより前のセッション）・null は `object`。書くときはいつも書く。
     @WorkKindCoding public var workKind: WorkKind
+    /// 立体の作品の撮影の案内のしかた（`heading`：向きで案内 | `baseCylinder`：底の中心と円柱）。平面の作品は null。
+    /// 後から足した項目で、キーが無い・null の立体のセッションは `baseCylinder`（`captureGuidance`）。書くときはいつも書く。
+    @NullCodable public var guidance: CaptureGuidance?
     public var createdAt: Date
     public var updatedAt: Date
     public var conventions: [String: String]
@@ -77,13 +80,15 @@ public struct CaptureSession: Codable, Equatable, Sendable {
         createdAt: Date,
         device: DeviceInfo,
         directionPlan: DirectionPlan,
-        workKind: WorkKind = .object
+        workKind: WorkKind = .object,
+        guidance: CaptureGuidance? = nil
     ) {
         schema = SessionSchema.name
         schemaVersion = SessionSchema.version
         self.sessionId = sessionId
         self.title = title
         self.workKind = workKind
+        self.guidance = workKind == .flat ? nil : guidance
         self.createdAt = createdAt
         updatedAt = createdAt
         conventions = Conventions.text
@@ -155,7 +160,8 @@ public struct ObjectSize: Codable, Equatable, Sendable {
 public struct ReferenceFrame: Codable, Equatable, Sendable {
     public var id: String
     public var createdAt: Date
-    public var basePointWorld: Vector3
+    /// 基準点（作品の底の中心）。向きで案内した基準では、撮ったあとに机の面が分かったときだけ入り、分からなければ null。
+    @NullCodable public var basePointWorld: Vector3?
     @NullCodable public var objectToWorld: Matrix4x4?
     @NullCodable public var frontPhotoId: String?
     @NullCodable public var invalidatedAt: Date?
@@ -164,6 +170,8 @@ public struct ReferenceFrame: Codable, Equatable, Sendable {
     @NullCodable public var object: ObjectSize?
     /// 基準点をどの方法で求めたか（平面・特徴点・iPhone の下端、手で合わせた高さ）。この項目より前に作った基準は null。
     @NullCodable public var base: BasePointInfo?
+    /// 向きで案内した基準の記録（正面の向き・撮ったあとに求めた中心と大きさ）。ほかの基準は null（後から足した項目）。
+    @NullCodable public var heading: HeadingReference?
 
     public init(id: String, createdAt: Date, basePointWorld: SIMD3<Double>, object: ObjectSize? = nil, base: BasePointInfo? = nil) {
         self.id = id
@@ -175,7 +183,19 @@ public struct ReferenceFrame: Codable, Equatable, Sendable {
         invalidationReason = nil
         self.object = object
         self.base = base
+        heading = nil
     }
+
+    /// 向きで案内する基準（底の中心・円柱を決めない。正面は最初の写真で決まる）。
+    public static func headingFrame(id: String, createdAt: Date) -> ReferenceFrame {
+        var frame = ReferenceFrame(id: id, createdAt: createdAt, basePointWorld: .zero)
+        frame.basePointWorld = nil
+        frame.heading = HeadingReference()
+        return frame
+    }
+
+    /// 向きで案内する基準か。
+    public var isHeading: Bool { heading != nil }
 
     public var isValid: Bool { invalidatedAt == nil }
 }
@@ -195,13 +215,15 @@ public struct Photo: Codable, Equatable, Sendable, Identifiable {
     public var mask: MaskInfo
     /// 平面の作品の写真で測ったもの（用紙の四隅・実寸・補正した画像）。立体の作品の写真と、この項目より前の写真は null。
     @NullCodable public var flat: FlatPhotoInfo?
+    /// 向きで案内した写真の、撮ったときの向き（正面からの向きの差・見下ろす角度・位置の確かめ）。ほかの写真は null。
+    @NullCodable public var heading: PhotoHeadingInfo?
 
     public var id: String { photoId }
 
     public init(
         photoId: String, sequence: Int, capturedAt: Date, trigger: CaptureTrigger, referenceFrameId: String?,
         image: ImageInfo, camera: CameraInfo, direction: DirectionInfo, quality: PhotoQuality, mask: MaskInfo,
-        flat: FlatPhotoInfo? = nil
+        flat: FlatPhotoInfo? = nil, heading: PhotoHeadingInfo? = nil
     ) {
         self.photoId = photoId
         self.sequence = sequence
@@ -214,6 +236,7 @@ public struct Photo: Codable, Equatable, Sendable, Identifiable {
         self.quality = quality
         self.mask = mask
         self.flat = flat
+        self.heading = heading
     }
 
     public static func imagePath(photoId: String) -> String { "photos/\(photoId).jpg" }
@@ -424,9 +447,9 @@ public enum Conventions {
         "cameraToWorld": "ARKit の ARCamera.transform（カメラ → 世界）。カメラ座標は ARKit の決まりで、+X が保存した画像の右、+Y が画像の上、−Z が見ている方向。OpenCV 式（x 右・y 下・z 前）にするには右から diag(1, −1, −1, 1) を掛ける",
         "intrinsics": "3 × 3 の K（行優先、ピクセル単位、原点は保存した画像の左上）。intrinsicsResolution の大きさの画像に対する値",
         "imageOrientation": "保存した画像はセンサーの向き（横長）のまま。EXIF Orientation は 1。displayRotationDegClockwise は、まっすぐ見るために時計回りに回す角度（表示用の情報で、K は回さない画像のもの）",
-        "objectToWorld": "原点は作品の底面中央（基準マーカー）。+Y は上、+Z は基準点から正面のカメラへ向かう水平方向、+X = Y × Z（正面から見て右）",
-        "azimuthDeg": "作品座標でのカメラ位置 (x, z) について atan2(x, z) を度にして 0〜360。0 = 正面、90 = +X 側（正面から見て右へ回り込んだ位置）",
-        "elevationDeg": "作品の中心（基準点から heightM / 2 上）からカメラへのベクトルの水平面からの角度。上から見下ろすと正",
-        "distanceM": "作品の中心（基準点から heightM / 2 上）からカメラまでの距離",
+        "objectToWorld": "原点は作品の底面中央（基準マーカー）。+Y は上、+Z は基準点から正面のカメラへ向かう水平方向、+X = Y × Z（正面から見て右）。向きで案内した基準（heading）は撮ったあとに写真から求め、+Z は正面の写真の向きの反対、原点は机の面が分かれば底の中心、分からなければ求めた中心（heading.derivation.origin）",
+        "azimuthDeg": "作品座標でのカメラ位置 (x, z) について atan2(x, z) を度にして 0〜360。0 = 正面、90 = +X 側（正面から見て右へ回り込んだ位置）。向きで案内した基準では、中心を求める前は正面からの向きの差",
+        "elevationDeg": "作品の中心（基準点から heightM / 2 上）からカメラへのベクトルの水平面からの角度。上から見下ろすと正。向きで案内した基準では撮ったあとに求めた中心から、求める前は見下ろす角度",
+        "distanceM": "作品の中心（基準点から heightM / 2 上）からカメラまでの距離。向きで案内した基準では撮ったあとに求めた中心から",
     ]
 }

@@ -101,6 +101,8 @@ public struct MaskCheckThresholds: Equatable, Sendable {
     public var maxCenterOffset: Double = 0.35
     /// 確かめる画像の長い辺（ピクセル）。これより大きいマスクは間引いて数える。
     public var analysisMaxSide: Int = 512
+    /// 十字のまわりの切り抜き（向きで案内したセッション）：マスクが切り抜きのこの割合より小さいと `tooSmall`（作品が写っていない）。
+    public var crosshairMinCoverage: Double = 0.003
 
     public init() {}
 
@@ -142,6 +144,7 @@ public enum MaskPlausibility {
     public static func evaluate(
         plan: MaskCropPlan, thresholds t: MaskCheckThresholds = .default, isMask: (Int, Int) -> Bool
     ) -> MaskCheck {
+        if plan.source == .crosshair { return evaluateCrosshair(plan: plan, thresholds: t, isMask: isMask) }
         guard plan.source == .projectedCylinder, let object = plan.object, object.silhouette.count >= 3 else { return .unknown }
         let region = plan.region
         guard region.width > 0, region.height > 0 else { return .unknown }
@@ -205,6 +208,57 @@ public enum MaskPlausibility {
             insideSilhouetteRatio: round4(inside), cropCoverage: round4(cropCoverage),
             silhouetteAreaRatio: areaRatio.isFinite ? round4(areaRatio) : nil,
             centerOffset: offset.isFinite ? round4(offset) : nil, touchedCropEdges: touched
+        )
+    }
+
+    /// 十字のまわりの切り抜き（向きで案内したセッション）のマスクを確かめる。作品の輪郭が無いので、輪郭と比べる割合
+    /// （`insideSilhouetteRatio`・`silhouetteAreaRatio`）は null。分かることだけで決める：
+    /// 空（`empty`）、切り抜きの `crosshairMinCoverage` 未満（`tooSmall`）、切り抜きの `maxCropCoverage` より広い（`tooLarge`）、
+    /// 切り抜きの 2 辺以上に届く（`touchesCropEdge`）、十字のまわり（`plan.object`）に 1 つも無く、重心が切り抜きの中心から
+    /// 切り抜きの辺の `maxCenterOffset` 倍より離れている（`offCenter`）。
+    static func evaluateCrosshair(plan: MaskCropPlan, thresholds t: MaskCheckThresholds, isMask: (Int, Int) -> Bool) -> MaskCheck {
+        let region = plan.region
+        guard region.width > 0, region.height > 0 else { return .unknown }
+        let step = max(1, Int((Double(max(region.width, region.height)) / Double(max(1, t.analysisMaxSide))).rounded(.up)))
+        let cols = (region.width + step - 1) / step, rows = (region.height + step - 1) / step
+        let focus = plan.object?.boundingBox
+        let center = SIMD2(Double(region.x) + Double(region.width) / 2, Double(region.y) + Double(region.height) / 2)
+        let band = max(1, Int((t.edgeBandFraction * Double(min(cols, rows))).rounded(.up)))
+        var edgeHits = [0, 0, 0, 0]
+        var maskCount = 0, focusCount = 0
+        var sumX = 0.0, sumY = 0.0
+        for r in 0..<rows {
+            let iy = region.y + r * step + step / 2
+            for c in 0..<cols {
+                let ix = region.x + c * step + step / 2
+                guard isMask(ix, iy) else { continue }
+                maskCount += 1
+                let cx = Double(ix) + 0.5, cy = Double(iy) + 0.5
+                sumX += cx
+                sumY += cy
+                if let f = focus, cx >= f.minX, cx < f.maxX, cy >= f.minY, cy < f.maxY { focusCount += 1 }
+                if c < band { edgeHits[0] += 1 }
+                if c >= cols - band { edgeHits[1] += 1 }
+                if r < band { edgeHits[2] += 1 }
+                if r >= rows - band { edgeHits[3] += 1 }
+            }
+        }
+        guard maskCount > 0 else {
+            return MaskCheck(status: .suspicious, reasons: [.empty], cropCoverage: 0, touchedCropEdges: 0)
+        }
+        let coverage = Double(maskCount) / Double(cols * rows)
+        let centroid = SIMD2(sumX, sumY) / Double(maskCount)
+        let offset = simd_length(centroid - center) / Double(max(region.width, region.height))
+        let sideSamples = [rows * band, rows * band, cols * band, cols * band]
+        let touched = (0..<4).filter { Double(edgeHits[$0]) > t.minEdgeTouchFraction * Double(max(1, sideSamples[$0])) }.count
+        var reasons: [MaskCheckReason] = []
+        if touched >= t.maxTouchedCropEdges { reasons.append(.touchesCropEdge) }
+        if coverage > t.maxCropCoverage { reasons.append(.tooLarge) }
+        if coverage < t.crosshairMinCoverage { reasons.append(.tooSmall) }
+        if focusCount == 0 && offset > t.maxCenterOffset { reasons.append(.offCenter) }
+        return MaskCheck(
+            status: reasons.isEmpty ? .ok : .suspicious, reasons: reasons, insideSilhouetteRatio: nil,
+            cropCoverage: round4(coverage), silhouetteAreaRatio: nil, centerOffset: round4(offset), touchedCropEdges: touched
         )
     }
 

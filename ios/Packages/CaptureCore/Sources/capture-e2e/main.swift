@@ -1,9 +1,10 @@
 // capture-e2e：小さな合成セッションを作って、受信側（receiver/memoria_receiver.py）へ送る確認ツール（macOS）。
 //
-//   swift run capture-e2e http://127.0.0.1:8765 123456 [--keep] [--flat]
+//   swift run capture-e2e http://127.0.0.1:8765 123456 [--keep] [--flat | --heading]
 //
 // 1. 一時フォルダに SessionStore で合成セッション（写真 3 枚・マスク 2 枚）を作る
 //    --flat のときは平面の作品のセッション（workKind flat・flat1。真上の写真 1 枚・用紙の四隅・実寸・補正した画像）
+//    --heading のときは向きで案内した立体のセッション（guidance heading・ai5。5 枚・十字のまわりのマスク・撮ったあとに求めた中心と大きさ）
 // 2. 送る → complete を期待
 // 3. もう一度送る → alreadyComplete を期待
 // 4. 作品名を変えて送る → 新しい manifestHash で complete を期待（受信側は前の版を replaced/ へ）
@@ -41,8 +42,9 @@ func encodeImage(width: Int, height: Int, gray: Bool, type: UTType, draw: (CGCon
 let args = CommandLine.arguments.dropFirst().filter { !$0.hasPrefix("--") }
 let keep = CommandLine.arguments.contains("--keep")
 let flatMode = CommandLine.arguments.contains("--flat")
+let headingMode = CommandLine.arguments.contains("--heading")
 guard args.count >= 2, let receiverURL = TransferClient.receiverURL(fromUserInput: args[args.startIndex]) else {
-    print("使い方: capture-e2e <受信側の URL（http://IP:port）> <ペアリングコード> [--keep] [--flat]")
+    print("使い方: capture-e2e <受信側の URL（http://IP:port）> <ペアリングコード> [--keep] [--flat | --heading]")
     exit(2)
 }
 let token = args[args.startIndex + 1]
@@ -55,6 +57,8 @@ let device = DeviceInfo(model: "Mac-e2e", systemName: "macOS", systemVersion: Pr
 var session: CaptureSession
 if flatMode {
     session = makeFlatSession()
+} else if headingMode {
+    session = makeHeadingSession()
 } else {
     session = makeObjectSession()
 }
@@ -122,6 +126,92 @@ func makeFlatSession() -> CaptureSession {
     }
     guard let p = session.photos.first, p.direction.targetId == "top-e90", p.flat?.rectified != nil else { fail("平面の写真の記録が想定と違います") }
     print(String(format: "平面の作品：用紙 %.3f × %.3f m、補正した画像 %d × %d", size.widthM, size.heightM, rs.width, rs.height))
+    return session
+}
+
+/// 向きで案内した立体：中心 `center` の 10 × 6 × 4 cm の箱を、正面（0.35 m・15°）・右・後ろ・左と真上から撮った 5 枚。
+/// 写真には箱の投影を塗り、マスクはその長方形（十字のまわりの切り抜きで作った扱い）。撮ったあとに中心と大きさを求める（iPhone と同じ計算）。
+func makeHeadingSession() -> CaptureSession {
+    var session: CaptureSession
+    do {
+        session = try store.createSession(title: "e2e 向きの案内", device: device, plan: DirectionPlanPreset.ai5.plan, workKind: .object, guidance: .heading)
+    } catch {
+        fail("セッションを作れません: \(error)")
+    }
+    let width = 640, height = 480, fx = 560.0
+    let intrinsics = simd_double3x3(rows: [SIMD3(fx, 0, Double(width) / 2), SIMD3(0, fx, Double(height) / 2), SIMD3(0, 0, 1)])
+    let center = SIMD3<Double>(0.05, -0.3, -0.45)
+    let half = SIMD3<Double>(0.05, 0.02, 0.03)
+    var bounds: [String: MaskBounds] = [:]
+    var frontHeading: Double?
+    for (i, (az, el)) in [(0.0, 15.0), (90, 14), (180, 16), (270, 15), (25, 86)].enumerated() {
+        let a = az * .pi / 180, e = el * .pi / 180
+        let position = center + 0.35 * SIMD3(sin(a) * cos(e), sin(e), cos(a) * cos(e))
+        let forward = simd_normalize(center - position)
+        var right = simd_cross(forward, SIMD3(0, 1, 0))
+        if simd_length(right) < 1e-6 { right = SIMD3(1, 0, 0) }
+        right = simd_normalize(right)
+        let up = simd_cross(right, forward)
+        let cameraToWorld = simd_double4x4(columns: (SIMD4(right, 0), SIMD4(up, 0), SIMD4(-forward, 0), SIMD4(position, 1)))
+        frontHeading = frontHeading ?? HeadingMath.headingDeg(cameraToWorld: cameraToWorld)
+        let o2w = HeadingDeriver.objectToWorld(center: center, frontHeadingDeg: frontHeading!, originY: center.y)
+        let camera = CameraModel(cameraToWorld: cameraToWorld, intrinsics: intrinsics, imageWidth: Double(width), imageHeight: Double(height))
+        let pixels = (0..<8).compactMap { c -> SIMD2<Double>? in
+            let q = o2w * SIMD4(c & 1 == 0 ? -half.x : half.x, c & 2 == 0 ? -half.y : half.y, c & 4 == 0 ? -half.z : half.z, 1)
+            return camera.project(SIMD3(q.x, q.y, q.z))
+        }
+        let box = PixelRect(minX: pixels.map(\.x).min()!, minY: pixels.map(\.y).min()!, maxX: pixels.map(\.x).max()!, maxY: pixels.map(\.y).max()!)
+        let jpeg = encodeImage(width: width, height: height, gray: false, type: .jpeg) { c in
+            c.setFillColor(CGColor(red: 0.85, green: 0.8, blue: 0.7, alpha: 1))
+            c.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            c.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1))
+            c.fill(CGRect(x: box.minX, y: Double(height) - box.maxY, width: box.width, height: box.height))
+        }
+        let png = encodeImage(width: width, height: height, gray: true, type: .png) { c in
+            c.setFillColor(gray: 0, alpha: 1)
+            c.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            c.setFillColor(gray: 1, alpha: 1)
+            c.fill(CGRect(x: box.minX, y: Double(height) - box.maxY, width: box.width, height: box.height))
+        }
+        let frame = CapturedFrameInfo(
+            cameraToWorld: cameraToWorld, intrinsics: intrinsics, intrinsicsResolution: PixelSize(width: width, height: height),
+            imageSize: PixelSize(width: width, height: height), timestamp: 200 + Double(i), exposureDuration: 0.01,
+            exposureOffset: 0, trackingState: .normal, trackingReason: nil
+        )
+        let context = CaptureContext(
+            trigger: i == 0 ? .manual : .auto, referenceFrameId: session.referenceFrames.last?.id, liveQuality: .unknown,
+            deviceOrientation: "landscapeLeft", displayRotationDegClockwise: 0, capturedAt: Date()
+        )
+        let photoId = SessionStore.newId()
+        do {
+            let photo = try store.addPhoto(sessionId: session.sessionId, photoId: photoId, jpegData: jpeg) { s, sequence in
+                PhotoRecorder.makeHeadingPhoto(in: &s, photoId: photoId, sequence: sequence, frame: frame, context: context)
+            }
+            guard photo.direction.targetId != nil else { fail("写真 \(i) が方向に当てはまりません") }
+            let plan = MaskCropPlanner.crosshairPlan(imageWidth: width, imageHeight: height)
+            try store.saveMask(sessionId: session.sessionId, photoId: photoId, pngData: png, mask: MaskInfo(
+                status: .candidate, width: width, height: height, method: MaskInfo.visionMethod, instanceCount: 1, selectedInstances: [1],
+                selection: .auto, check: MaskCheck(status: .ok, reasons: [])
+            ).recording(plan))
+            bounds[photoId] = MaskBounds(box: PixelRect(minX: box.minX.rounded(), minY: box.minY.rounded(), maxX: box.maxX.rounded(), maxY: box.maxY.rounded()),
+                                         touches: [false, false, false, false], width: width, height: height)
+            session = try store.loadSession(session.sessionId)
+        } catch {
+            fail("写真を保存できません: \(error)")
+        }
+    }
+    do {
+        session = try store.updateSession(session.sessionId) { s in
+            HeadingSizer.refresh(session: &s) { bounds[$0.photoId] }
+        }
+    } catch {
+        fail("中心と大きさを書けません: \(error)")
+    }
+    guard let d = session.referenceFrames.last?.heading?.derivation, let c = d.centerWorld?.simd, let size = d.size, size.isKnown else {
+        fail("中心か大きさを求められません")
+    }
+    print(String(format: "向きの案内：中心のずれ %.1f mm、大きさ %.1f × %.1f × %.1f cm（下の目安 %.1f × %.1f × %.1f）", simd_distance(c, center) * 1000,
+                 size.widthM! * 100, size.depthM! * 100, size.heightM! * 100, size.lowerM!.widthM * 100, size.lowerM!.depthM * 100, size.lowerM!.heightM * 100))
     return session
 }
 

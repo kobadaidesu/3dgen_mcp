@@ -102,6 +102,8 @@ public struct LiveFrameSample: Equatable, Sendable {
     public var reference: ReferenceState
     public var projection: ProjectionResult?
     public var direction: DirectionContext?
+    /// 向きで案内するときの、今の向きの情報（`direction` と `projection` の代わり）。ほかの案内では nil。
+    public var heading: HeadingContext?
     public var angularSpeed: Double
     public var linearSpeed: Double
     public var meanLuma: Double?
@@ -114,7 +116,8 @@ public struct LiveFrameSample: Equatable, Sendable {
         timestamp: Double, trackingState: TrackingState, trackingReason: TrackingReason? = nil,
         reference: ReferenceState = .none, projection: ProjectionResult? = nil, direction: DirectionContext? = nil,
         angularSpeed: Double = 0, linearSpeed: Double = 0, meanLuma: Double? = nil, sharpness: Double? = nil,
-        ambientIntensity: Double? = nil, exposureDuration: Double? = nil, captureInFlight: Bool = false
+        ambientIntensity: Double? = nil, exposureDuration: Double? = nil, captureInFlight: Bool = false,
+        heading: HeadingContext? = nil
     ) {
         self.timestamp = timestamp
         self.trackingState = trackingState
@@ -122,6 +125,7 @@ public struct LiveFrameSample: Equatable, Sendable {
         self.reference = reference
         self.projection = projection
         self.direction = direction
+        self.heading = heading
         self.angularSpeed = angularSpeed
         self.linearSpeed = linearSpeed
         self.meanLuma = meanLuma
@@ -218,11 +222,13 @@ public struct QualityEvaluator: Sendable {
             trackingCheck(sample), inFrameCheck(sample), directionCheck(sample),
             motionCheck(sample), brightnessCheck(sample), sharpnessCheck(sample),
         ]
-        let allOK = checks.allSatisfy { $0.status == .ok }
+        // 向きの案内では、作品が画面の中央にあるか（収まり）は撮る人が十字で合わせる（アプリは判定しない）。
+        let allOK = checks.allSatisfy { $0.status == .ok || (sample.heading != nil && $0.kind == .inFrame) }
         // 正面を決める 1 枚目は、ユーザーが正面を選んで手で撮る（自動では撮らない）。
-        let onUncoveredTarget = sample.reference == .ready && (sample.direction?.isOnUncoveredTarget ?? false)
+        let onUncoveredTarget = sample.reference == .ready
+            && (sample.heading.map(\.isOnUncoveredTarget) ?? sample.direction?.isOnUncoveredTarget ?? false)
         let eligible = allOK && onUncoveredTarget && !sample.captureInFlight
-        let targetId = eligible ? sample.direction?.matchedTarget?.id : nil
+        let targetId = eligible ? (sample.heading?.matchedTarget?.id ?? sample.direction?.matchedTarget?.id) : nil
 
         if eligible {
             if stableTargetId == targetId, stableSince != nil {
@@ -288,6 +294,9 @@ public struct QualityEvaluator: Sendable {
     }
 
     private func inFrameCheck(_ s: LiveFrameSample) -> CheckResult {
+        if s.heading != nil {
+            return CheckResult(kind: .inFrame, status: .unknown, message: "作品を画面の中央の十字に合わせてください")
+        }
         guard s.reference != .none, let projection = s.projection else {
             return CheckResult(kind: .inFrame, status: .unknown, message: "基準を設定すると収まりを確認します")
         }
@@ -312,6 +321,15 @@ public struct QualityEvaluator: Sendable {
     }
 
     private func directionCheck(_ s: LiveFrameSample) -> CheckResult {
+        if let heading = s.heading {
+            if !heading.hasFront {
+                return CheckResult(kind: .direction, status: heading.frontPitchOK == false ? .warning : .ok, message: heading.guidance)
+            }
+            if heading.allCovered || heading.isOnUncoveredTarget {
+                return CheckResult(kind: .direction, status: .ok, message: heading.guidance)
+            }
+            return CheckResult(kind: .direction, status: .warning, message: heading.guidance)
+        }
         guard s.reference != .none, let direction = s.direction else {
             return CheckResult(kind: .direction, status: .unknown, message: "基準を設定すると撮る方向を案内します")
         }

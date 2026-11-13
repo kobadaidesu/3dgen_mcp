@@ -163,10 +163,13 @@ public final class SessionStore: @unchecked Sendable {
         }
     }
 
-    public func createSession(title: String, device: DeviceInfo, plan: DirectionPlan, workKind: WorkKind = .object, now: Date = Date()) throws -> CaptureSession {
+    /// - Parameter guidance: 立体の作品の案内のしかた。nil なら立体は `baseCylinder`（平面の作品はいつも null）。
+    public func createSession(title: String, device: DeviceInfo, plan: DirectionPlan, workKind: WorkKind = .object,
+                              guidance: CaptureGuidance? = nil, now: Date = Date()) throws -> CaptureSession {
         lock.lock(); defer { lock.unlock() }
         let id = Self.newId()
-        let session = CaptureSession(sessionId: id, title: title, createdAt: now, device: device, directionPlan: plan, workKind: workKind)
+        let session = CaptureSession(sessionId: id, title: title, createdAt: now, device: device, directionPlan: plan, workKind: workKind,
+                                     guidance: workKind == .flat ? nil : (guidance ?? .baseCylinder))
         let dir = sessionDirectory(id)
         do {
             try fileManager.createDirectory(at: dir.appendingPathComponent("photos"), withIntermediateDirectories: true)

@@ -231,6 +231,8 @@ public enum PhotoIssue: String, CaseIterable, Sendable {
     case sheetAtFrameEdge
     /// 平面の作品：真上から撮れていない（iPhone の傾きが真上の許容の外。`targetId` が null）。
     case notOverhead
+    /// 向きで案内した写真：狙った向き・高さの外か、作品のまわりを歩いた位置から撮れていない（`targetId` が null。手で撮った写真）。
+    case offTarget
 
     public var label: String {
         switch self {
@@ -242,6 +244,7 @@ public enum PhotoIssue: String, CaseIterable, Sendable {
         case .sheetNotFound: return "用紙が見つからない"
         case .sheetAtFrameEdge: return "用紙が端で切れているかも"
         case .notOverhead: return "真上から撮れていない"
+        case .offTarget: return "狙った向きの外"
         }
     }
 }
@@ -302,6 +305,7 @@ public struct Readiness: Equatable, Sendable {
                 pending += 1
             }
             if !photo.direction.confirmed { list.append(.directionUnconfirmed) }
+            if photo.heading != nil, photo.direction.confirmed, photo.direction.targetId == nil { list.append(.offTarget) }
             if superseded.contains(photo.photoId) { list.append(.superseded) }
             if !list.isEmpty { issues[photo.photoId] = list }
         }
