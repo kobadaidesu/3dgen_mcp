@@ -42,7 +42,8 @@ iPhone のアプリも、送り先が公開 IP アドレス（名前なら、引
 - 完成したセッションは `captures/sessions/<sessionId>/` だけです。`incoming/` は転送の途中なので使いません。
 - フォルダの読み方は、受信サーバーが書く `captures/README.md` にあります。形は [docs/data-format.md](../docs/data-format.md)。
 - 平面の作品（session.json の `workKind` が `flat`）のセッションには、マスクの代わりに `rectified/<photoId>.jpg`（遠近を直した画像。作れたときだけ）が入ります。受信サーバーは `rectified/<UUID>.jpg` の path を受け付け、`photos[].flat` の形と `rectified.file` が manifest にあるかを確かめます。
-- 一覧と中身の確認（`list` に種類「立体・平面」の列、`show` に種類と、平面の作品なら写真ごとの用紙・実寸・補正した画像の有無が出ます）:
+- 向きで案内した立体のセッション（session.json の `guidance` が `heading`）は、基準の `basePointWorld` が null のことがあります（机の面が分からないとき）。受信サーバーは `guidance` の値と、`referenceFrames[].heading`（撮ったあとに求めた中心・大きさ）の形を確かめます。`index.json` の各セッションに `guidance`（立体は `heading` か `baseCylinder`。無いセッションは `baseCylinder`、平面は null）が入ります。
+- 一覧と中身の確認（`list` に種類「立体・平面」の列（向きで案内した立体は「立体・向き」）、`show` に種類と案内のしかた、向きで案内した基準なら求めた中心（線の外れ）・机の面・おおよその大きさと写真ごとの向き、平面の作品なら写真ごとの用紙・実寸・補正した画像の有無が出ます）:
 
 ```sh
 python3 receiver/memoria_receiver.py list

@@ -704,6 +704,98 @@ class FlatSessionTests(ReceiverTestCase):
         self.assertIn("rectified/%s.jpg" % pid, text)
 
 
+def make_heading_capture(derived=True, size=True):
+    """A heading-guided 3D session (guidance heading): a frame without a base point, derived centre and approximate size."""
+    cap = Capture(photos=[(new_id(), 90, "candidate"), (new_id(), 90, "candidate")], title="ねんど")
+    derivation = {
+        "method": "opticalAxesLeastSquares", "status": "ok", "reasons": [], "photoIds": [p[0] for p in cap.photos],
+        "excludedPhotoIds": [], "centerWorld": [0.1, -0.2, -0.4], "residualRmsM": 0.008, "residualMaxM": 0.012,
+        "perPhoto": [], "origin": "center",
+        "size": {"status": "approximate", "confidence": "low", "method": "maskBoundsBoxAndCenterPlane",
+                 "reasons": ["shapeDependent"], "widthM": 0.065, "depthM": 0.127, "heightM": 0.044,
+                 "photoIds": [], "crossChecks": []} if size else None,
+    }
+    cap.session["guidance"] = "heading"
+    cap.session["referenceFrames"] = [{
+        "id": "ref-1", "basePointWorld": None, "objectToWorld": None, "frontPhotoId": cap.photos[0][0],
+        "heading": {"frontHeadingDeg": 6.9, "frontPitchDeg": 15.2, "derivation": derivation if derived else None},
+    }]
+    for p in cap.session["photos"]:
+        p["heading"] = {"relativeHeadingDeg": 0, "pitchDeg": 15.2, "position": "notChecked", "estimatedDistanceM": None}
+    cap.set_session(cap.session)
+    return cap
+
+
+class HeadingSessionTests(ReceiverTestCase):
+    def test_heading_session_is_accepted_and_indexed(self):
+        cap = make_heading_capture()
+        self.send(cap)
+        [entry] = self.index()
+        self.assertEqual(entry["guidance"], "heading")
+        self.assertEqual(entry["workKind"], "object")
+
+    def test_not_yet_derived_session_is_accepted(self):
+        cap = make_heading_capture(derived=False)
+        self.send(cap)
+        self.assertEqual(self.index()[0]["guidance"], "heading")
+
+    def test_guidance_defaults(self):
+        cap = Capture()
+        self.send(cap)
+        self.assertEqual(self.index()[0]["guidance"], "baseCylinder")  # 3D work from before the field
+        flat, _ = make_flat_capture()
+        self.send(flat)
+        self.assertIsNone([e for e in self.index() if e["workKind"] == "flat"][0]["guidance"])
+
+    def test_invalid_heading_fields(self):
+        def unknown_guidance(cap):
+            cap.session["guidance"] = "compass"
+
+        def bad_status(cap):
+            cap.session["referenceFrames"][0]["heading"]["derivation"]["status"] = "great"
+
+        def bad_center(cap):
+            cap.session["referenceFrames"][0]["heading"]["derivation"]["centerWorld"] = [1, 2]
+
+        def negative_size(cap):
+            cap.session["referenceFrames"][0]["heading"]["derivation"]["size"]["heightM"] = -0.01
+
+        def null_base_without_heading(cap):
+            cap.session["referenceFrames"][0]["heading"] = None
+
+        for mutate in (unknown_guidance, bad_status, bad_center, negative_size, null_base_without_heading):
+            with self.subTest(mutate.__name__):
+                cap = make_heading_capture()
+                mutate(cap)
+                cap.set_session(cap.session)
+                upload_id = self.upload_all(cap)
+                status, body = self.commit(cap, upload_id)
+                self.assertEqual((status, body["status"]), (422, "invalid"), body)
+
+    def test_show_prints_guidance_and_derivation(self):
+        cap = make_heading_capture()
+        self.send(cap)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(mr.main(["list", "--data-dir", str(self.data_dir)]), 0)
+            self.assertEqual(mr.main(["show", cap.sid[:8], "--data-dir", str(self.data_dir)]), 0)
+        text = out.getvalue()
+        self.assertIn("立体・向き", text)
+        self.assertIn("向きで案内（guidance heading）", text)
+        self.assertIn("線の外れ 0.8 cm", text)
+        self.assertIn("6.5 × 12.7 × 4.4 cm", text)
+        self.assertIn("机の面 分からない", text)
+        self.assertIn("見下ろし 15.2°", text)
+
+    def test_show_old_object_session_says_old_method(self):
+        cap = Capture()
+        self.send(cap)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            mr.main(["show", cap.sid[:8], "--data-dir", str(self.data_dir)])
+        self.assertIn("底の中心と円柱で案内（guidance baseCylinder。記録なし＝前の方法）", out.getvalue())
+
+
 class DisconnectLogTests(ReceiverTestCase):
     def _handle_error(self, error):
         out, err = io.StringIO(), io.StringIO()

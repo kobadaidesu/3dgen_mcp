@@ -56,6 +56,9 @@ DRAIN_LIMIT = 8 * 1024 * 1024  # unread request bodies up to this size are drain
 CHUNK_SIZE = 1024 * 1024
 MASK_FILE_STATUSES = ("candidate", "confirmed")
 WORK_KINDS = ("object", "flat")  # session.json "workKind" (added later; missing or null = "object")
+# session.json "guidance" (added later): how 3D work was guided. Missing or null = "baseCylinder" for 3D work, none for flat.
+GUIDANCES = ("heading", "baseCylinder")
+DERIVATION_STATUSES = ("ok", "lowConfidence", "unknown")
 AUTH_FAIL_LIMIT = 20  # failed tokens per client IP within AUTH_FAIL_WINDOW -> 429
 AUTH_FAIL_WINDOW = 300.0
 SIPS_PATH = "/usr/bin/sips"
@@ -313,6 +316,14 @@ def validate_session(path: Path, session_id: str, manifest_paths):
     kind = data.get("workKind")
     if kind is not None and kind not in WORK_KINDS:
         errors.append("workKind は %s のどれか（または無し）であるべきです（%r）" % (" / ".join(WORK_KINDS), kind))
+    guidance = data.get("guidance")
+    if guidance is not None and guidance not in GUIDANCES:
+        errors.append("guidance は %s のどれか（または無し）であるべきです（%r）" % (" / ".join(GUIDANCES), guidance))
+    frames = data.get("referenceFrames")
+    if isinstance(frames, list):
+        for i, frame in enumerate(frames):
+            if isinstance(frame, dict):
+                errors.extend(validate_heading_frame(frame, "referenceFrames[%d]" % i))
     photos = data.get("photos")
     if not isinstance(photos, list):
         errors.append("photos が配列ではありません")
@@ -388,6 +399,65 @@ def validate_flat(flat, label: str, pid: str, manifest_paths):
     return errors
 
 
+def _is_num(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _is_vec3(v) -> bool:
+    return isinstance(v, list) and len(v) == 3 and all(_is_num(x) for x in v)
+
+
+def validate_heading_frame(frame, label: str):
+    """referenceFrames[].heading (heading-guided capture, added later): null/missing is fine. basePointWorld may be null
+    for such frames. derivation (filled after capture) needs a known status; centerWorld is [x, y, z] or null; size
+    numbers are positive or null."""
+    errors = []
+    base = frame.get("basePointWorld")
+    heading = frame.get("heading")
+    if base is not None and not _is_vec3(base):
+        errors.append("%s.basePointWorld は [x, y, z] か null であるべきです" % label)
+    if base is None and heading is None and "basePointWorld" in frame:
+        errors.append("%s.basePointWorld が null なのは、向きで案内した基準（heading あり）だけです" % label)
+    if heading is None:
+        return errors
+    if not isinstance(heading, dict):
+        return errors + ["%s.heading がオブジェクトではありません" % label]
+    for key in ("frontHeadingDeg", "frontPitchDeg"):
+        if heading.get(key) is not None and not _is_num(heading.get(key)):
+            errors.append("%s.heading.%s が数ではありません" % (label, key))
+    d = heading.get("derivation")
+    if d is None:
+        return errors
+    if not isinstance(d, dict):
+        return errors + ["%s.heading.derivation がオブジェクトではありません" % label]
+    if d.get("status") not in DERIVATION_STATUSES:
+        errors.append("%s.heading.derivation.status は %s のどれかであるべきです（%r）"
+                      % (label, " / ".join(DERIVATION_STATUSES), d.get("status")))
+    center = d.get("centerWorld")
+    if center is not None and not _is_vec3(center):
+        errors.append("%s.heading.derivation.centerWorld は [x, y, z] か null であるべきです" % label)
+    if d.get("origin") not in (None, "base", "center"):
+        errors.append("%s.heading.derivation.origin は base / center / null であるべきです" % label)
+    size = d.get("size")
+    if size is not None:
+        if not isinstance(size, dict) or size.get("status") not in ("approximate", "unknown"):
+            errors.append("%s.heading.derivation.size.status は approximate / unknown であるべきです" % label)
+        else:
+            for key in ("widthM", "depthM", "heightM"):
+                v = size.get(key)
+                if v is not None and not (_is_num(v) and v > 0):
+                    errors.append("%s.heading.derivation.size.%s が正の数ではありません" % (label, key))
+    return errors
+
+
+def guidance_of(session) -> "str | None":
+    """How 3D work was guided: "heading" or "baseCylinder" (missing/null in sessions from before). None for flat artwork."""
+    if work_kind_of(session) == "flat":
+        return None
+    g = session.get("guidance") if isinstance(session, dict) else None
+    return g if g in GUIDANCES else "baseCylinder"
+
+
 def work_kind_of(session) -> str:
     kind = session.get("workKind") if isinstance(session, dict) else None
     return kind if kind in WORK_KINDS else "object"
@@ -429,6 +499,7 @@ def scan_sessions(data_dir: Path):
             "sessionId": d.name,
             "title": session.get("title"),
             "workKind": work_kind_of(session),
+            "guidance": guidance_of(session),
             "photoCount": len(photos),
             "maskCount": dict(sorted(mask_count.items())),
             "receivedAt": receipt.get("receivedAt"),
@@ -1162,6 +1233,7 @@ def connect_urls(addresses, port: int, allow_remote: bool = False):
 
 
 KIND_LABELS = {"object": "立体", "flat": "平面"}
+GUIDANCE_LABELS = {"heading": "向きで案内", "baseCylinder": "底の中心と円柱で案内"}
 
 
 def cmd_list(args) -> int:
@@ -1172,11 +1244,11 @@ def cmd_list(args) -> int:
         sessions = scan_sessions(data_dir)
     print("完了したセッション: %d 件（%s）" % (len(sessions), data_dir / "sessions"))
     if sessions:
-        print("%-36s  %-4s  %5s  %-28s  %-25s  %s" % ("sessionId", "種類", "写真", "マスク", "受信", "タイトル"))
+        print("%-36s  %-6s  %5s  %-28s  %-25s  %s" % ("sessionId", "種類", "写真", "マスク", "受信", "タイトル"))
         for s in sessions:
             masks = ", ".join("%s=%d" % kv for kv in (s.get("maskCount") or {}).items()) or "-"
-            kind = KIND_LABELS.get(s.get("workKind") or "object", "立体")
-            print("%-36s  %-4s  %5s  %-28s  %-25s  %s" % (s.get("sessionId"), kind, s.get("photoCount"), masks,
+            kind = KIND_LABELS.get(s.get("workKind") or "object", "立体") + ("・向き" if s.get("guidance") == "heading" else "")
+            print("%-36s  %-6s  %5s  %-28s  %-25s  %s" % (s.get("sessionId"), kind, s.get("photoCount"), masks,
                                                           s.get("receivedAt") or "-", s.get("title") or ""))
     incoming = scan_incoming(data_dir)
     print("転送途中（未完成。使わないでください）: %d 件" % len(incoming))
@@ -1207,6 +1279,31 @@ def cmd_show(args) -> int:
     kind = work_kind_of(session)
     plan = session.get("directionPlan") if isinstance(session.get("directionPlan"), dict) else {}
     print("種類         : %s（workKind %s、撮影方向 %s）" % (KIND_LABELS[kind], kind, plan.get("id") or "-"))
+    guidance = guidance_of(session)
+    if guidance:
+        print("案内         : %s（guidance %s%s）" % (GUIDANCE_LABELS[guidance], guidance,
+                                                   "" if session.get("guidance") else "。記録なし＝前の方法"))
+    for frame in session.get("referenceFrames") or []:
+        heading = frame.get("heading") if isinstance(frame, dict) else None
+        if not isinstance(heading, dict):
+            continue
+        d = heading.get("derivation") if isinstance(heading.get("derivation"), dict) else None
+        if d is None:
+            print("基準 %-7s : 向きで案内（撮ったあとの中心はまだ求めていません）" % frame.get("id"))
+            continue
+        rms = d.get("residualRmsM")
+        size = d.get("size") if isinstance(d.get("size"), dict) else None
+        if size and size.get("status") == "approximate":
+            size_text = "%s × %s × %s cm（おおよそ、信頼度 %s）" % tuple(
+                ["%.1f" % ((size.get(k) or 0) * 100) for k in ("widthM", "depthM", "heightM")] + [size.get("confidence") or "-"])
+        elif size:
+            size_text = "分からない（%s）" % ", ".join(size.get("reasons") or [])
+        else:
+            size_text = "まだ求めていない"
+        print("基準 %-7s : 中心 %s（写真 %d 枚、線の外れ %s）、机の面 %s、大きさ %s" % (
+            frame.get("id"), d.get("status"), len(d.get("photoIds") or []),
+            "%.1f cm" % (rms * 100) if _is_num(rms) else "-",
+            {"base": "あり", "center": "分からない"}.get(d.get("origin"), "-"), size_text))
     print("フォルダ     : %s" % folder)
     print("受信         : %s  manifestHash %s" % (receipt.get("receivedAt"), receipt.get("manifestHash")))
     print("写真         : %d 枚" % len(photos))
@@ -1222,6 +1319,10 @@ def cmd_show(args) -> int:
             p.get("sequence"), pid, "確定" if d.get("confirmed") else "参考",
             num(d.get("azimuthDeg")), num(d.get("elevationDeg")), d.get("targetId") or "-",
             mask.get("status") or "-", (p.get("image") or {}).get("displayRotationDegClockwise")))
+        heading = p.get("heading") if isinstance(p.get("heading"), dict) else None
+        if heading is not None:
+            print("     向き 正面から %s° 見下ろし %s° 位置 %s" % (
+                num(heading.get("relativeHeadingDeg")), num(heading.get("pitchDeg")), heading.get("position") or "-"))
         flat = p.get("flat") if isinstance(p.get("flat"), dict) else None
         if flat is not None:
             size = flat.get("size") if isinstance(flat.get("size"), dict) else None
@@ -1278,7 +1379,7 @@ iPhone のアプリから同じネットワーク（自宅の LAN・USB ケー�
 |---|---|---|
 | `for_claude/<sessionId>/` | AI ツール向けの入力（`brief.md`・`overview.jpg`・`views/`・`measurements.json`・`hull.obj`・`pack.json`。平面の作品は `overview.jpg`・`hull.obj` なし）。受信のたびに `tools/claude-pack` の `memoria-pack` が作り直す（ビルドしてあるときだけ） | **AI ツールの入口はここ**。読むだけ（作り直すと置き換わる） |
 | `sessions/<sessionId>/` | 全部のファイルが届き、ハッシュと session.json を確かめ終わったセッション | 元のデータ。**書き込まない**（計算に使うのはここだけ） |
-| `index.json` | `sessions/` の一覧（sessionId・title・workKind（object＝立体・flat＝平面）・photoCount・maskCount（mask.status ごとの数）・receivedAt・manifestHash・path） | 一覧を見るのに使う |
+| `index.json` | `sessions/` の一覧（sessionId・title・workKind（object＝立体・flat＝平面）・guidance（立体の撮り方の案内：heading＝向き・baseCylinder＝底の中心と円柱。平面は null）・photoCount・maskCount（mask.status ごとの数）・receivedAt・manifestHash・path） | 一覧を見るのに使う |
 | `incoming/` | 転送の途中。ファイルが欠けていたり、確かめる前だったりする | **使わない・読まない・消さない**（受信サーバーが使う） |
 | `replaced/<sessionId>-<UTC 時刻>/` | 同じセッションを撮り直して送り直したときの前の版 | 前の版が要るときだけ |
 | `.receiver.json` | 受信機の ID とペアリングコード | 触らない（秘密の値を含む） |
@@ -1291,7 +1392,7 @@ iPhone のアプリから同じネットワーク（自宅の LAN・USB ケー�
 brief.md            最初に読む説明（作品名・実寸と誤差・座標の決まり・写真の一覧・撮れていない範囲・使い方）
 overview.jpg        選んだ写真の一覧（カメラの位置に並べ、上から見た配置で正面が下）と実寸
 views/<向き>.jpg     代表の写真をまっすぐに回し、作品のまわりで切り抜いたもの（背景は写ったまま。長い辺 1568 px 以下）
-measurements.json   実寸（輪郭が 8 枚以上なら visual hull で測った幅 X・奥行き Z・高さ Y と誤差。少ないときは撮影時に合わせた円柱の大きさ＝目安）
+measurements.json   実寸（輪郭が 8 枚以上なら visual hull で測った幅 X・奥行き Z・高さ Y と誤差。少ないときは撮影時に合わせた円柱の大きさ＝目安。向きで案内したセッションは撮ったあとに切り抜きから求めたおおよその大きさ）
 hull.obj            粗い形（visual hull を作れたときだけ。メートル、+Y が上、+Z が正面、y = 0 が机の面）
 pack.json           写真の選び方・出どころ（sessionId・manifestHash）
 ```
@@ -1314,6 +1415,7 @@ upright/masks/<photoId>.png    同じくマスクの表示用コピー
 
 - `session.json` の `photos[]` の 1 つが 1 枚の写真です。`photos[].photoId` → `photos/<photoId>.jpg`（`image.file`）。
 - マスクは `photos[].mask.status` が `candidate`（自動で選んだ・未確定）か `confirmed`（ユーザーが確認）のときだけ `masks/<photoId>.png`（`mask.file`）があります。ほかの status（`notGenerated`・`processing`・`failed`・`noObject`）ではマスクはありません。
+- 向きで案内したセッション（`guidance` が `heading`）は、撮るときに底の中心・円柱を決めていません。作品の中心・作品座標（`objectToWorld`）・写真ごとの方位と仰角・おおよその大きさは、撮ったあとに写真の中心の線と切り抜きから求めた値で、`referenceFrames[].heading.derivation` に求め方と線の外れ方（残差）があります。机の高さが分からないときは `basePointWorld` が null で、`objectToWorld` の原点は求めた中心です。
 - 平面の作品（`workKind` が `flat`）はマスクを作りません。`photos[].flat` に、用紙の四隅（`corners`。元写真のピクセル。無ければ null）・実寸（`size`。測れなければ null）・補正した画像（`rectified`）が入ります。
 - カメラの姿勢 `camera.cameraToWorld`、内部パラメータ `camera.intrinsics`（K）、方向 `direction` は写真ごとです。`direction.confirmed` が false の写真の方向は参考値です。
 - 別の `referenceFrameId` の写真どうしの姿勢は比べられません（同じ世界座標とは限らない）。
@@ -1334,7 +1436,7 @@ upright/masks/<photoId>.png    同じくマスクの表示用コピー
 | `cameraToWorld` | ARKit の `ARCamera.transform`（カメラ → 世界）。カメラ座標は ARKit の決まりで、+X が保存した画像の右、+Y が画像の上、−Z が見ている方向。OpenCV 式（x 右・y 下・z 前）にするには右から `diag(1, −1, −1, 1)` を掛ける |
 | `intrinsics` | 3 × 3 の K（行優先、ピクセル単位、原点は保存した画像の左上）。`intrinsicsResolution` の大きさの画像に対する値 |
 | 画像の向き | 保存した画像はセンサーの向き（横長）のまま。EXIF Orientation は 1。`displayRotationDegClockwise` は、まっすぐ見るために時計回りに回す角度（表示用の情報で、K は回さない画像のもの） |
-| 作品座標（objectToWorld） | 原点は作品の底面中央（基準マーカー）。+Y は上、+Z は基準点から正面のカメラへ向かう水平方向、+X = Y × Z（正面から見て右） |
+| 作品座標（objectToWorld） | 原点は作品の底面中央（基準マーカー）。+Y は上、+Z は基準点から正面のカメラへ向かう水平方向、+X = Y × Z（正面から見て右）。向きで案内した基準は撮ったあとに求め、原点は机の面が分かれば底の中心、分からなければ求めた中心 |
 | 方位角 `azimuthDeg` | 作品座標でのカメラ位置 (x, z) について `atan2(x, z)` を度にして 0〜360。0 = 正面、90 = +X 側（正面から見て右へ回り込んだ位置） |
 | 仰角 `elevationDeg` | 作品の中心（基準点から `heightM / 2` 上）からカメラへのベクトルの水平面からの角度。上から見下ろすと正 |
 

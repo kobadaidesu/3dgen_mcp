@@ -33,6 +33,7 @@ SIPS_PATH = "/usr/bin/sips"
 
 SESSION_ID_RE = re.compile(r"[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}")
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png")
+GUIDANCES = ("heading", "baseCylinder")  # session.json "guidance" (added later)
 WORK_KINDS = ("object", "flat")  # session.json "workKind": missing or null means "object" (sessions from before it)
 LABEL_MAX = 64
 
@@ -153,6 +154,15 @@ def work_kind(session) -> str:
     return kind if kind in WORK_KINDS else "object"
 
 
+def guidance(session) -> "str | None":
+    """How 3D work was guided during capture: "heading" (crosshair + phone heading; position and size derived after capture)
+    or "baseCylinder" (base point and cylinder set before shooting; also sessions without the field). None for flat artwork."""
+    if work_kind(session) == "flat":
+        return None
+    g = session.get("guidance") if isinstance(session, dict) else None
+    return g if g in GUIDANCES else "baseCylinder"
+
+
 def session_summary(root: Path, folder: Path) -> dict:
     sid = folder.name
     session = read_json(folder / "session.json")
@@ -165,6 +175,7 @@ def session_summary(root: Path, folder: Path) -> dict:
         "sessionId": sid,
         "title": session.get("title") or "",
         "workKind": work_kind(session),
+        "guidance": guidance(session),
         "capturePlan": plan.get("id"),
         "photoCount": len(photos),
         "receivedAt": _received_at(folder),
@@ -336,11 +347,13 @@ def get_brief(root: Path, session: str) -> dict:
     overview = _view_entry(pack, "overview", "overview.jpg", "overview", None)
     hull = pack / "hull.obj"
     provenance = index.get("provenance") if isinstance(index.get("provenance"), dict) else {}
-    kind = index.get("workKind") if index.get("workKind") in WORK_KINDS else work_kind(read_json(folder / "session.json"))
+    session = read_json(folder / "session.json")
+    kind = index.get("workKind") if index.get("workKind") in WORK_KINDS else work_kind(session)
     result = {
         "sessionId": folder.name,
         "title": index.get("title") if isinstance(index.get("title"), str) else "",
         "workKind": kind,
+        "guidance": index.get("guidance") if index.get("guidance") in GUIDANCES else guidance(session),
         "packDir": str(pack.resolve()),
         "briefPath": str((pack / "brief.md").resolve()),
         "brief": (pack / "brief.md").read_text(encoding="utf-8", errors="replace"),
@@ -356,6 +369,11 @@ def get_brief(root: Path, session: str) -> dict:
         "next": "Look at the overview and views with get_view (view=<name> or 'overview'); originals are listed by "
                 "get_original_photos; write results to the folder from output_dir.",
     }
+    if result["guidance"] == "heading":
+        result["next"] = ("Heading-guided capture: no base point or size was set while shooting; the object centre and the "
+                          "approximate size (measurements.sizeM, with lowerM/upperM bounds and confidence in "
+                          "measurements.heading) were derived after capture. Read brief.md for how reliable they are. "
+                          + result["next"])
     if kind == "flat":
         result["flat"] = index.get("flat") if isinstance(index.get("flat"), dict) else None
         result["next"] = ("Flat artwork (a drawing or collage shot once from straight above): no 3D reconstruction is "
@@ -469,11 +487,12 @@ def get_original_photos(root: Path, session: str) -> dict:
             "usedInPackAs": used_in_pack.get(pid),
             "flat": {"corners": flat.get("corners"), "sheetAtFrameEdge": flat.get("sheetAtFrameEdge"),
                      "size": flat.get("size"), "rectified": existing("rectified/%s.jpg" % pid)} if flat else None,
+            "heading": p.get("heading") if isinstance(p.get("heading"), dict) else None,
         })
     frames = []
     for f in data.get("referenceFrames", []) if isinstance(data.get("referenceFrames"), list) else []:
         if isinstance(f, dict):
-            frames.append({k: f.get(k) for k in ("id", "basePointWorld", "objectToWorld", "object",
+            frames.append({k: f.get(k) for k in ("id", "basePointWorld", "objectToWorld", "object", "base", "heading",
                                                   "invalidatedAt", "invalidationReason")})
     plan = data.get("directionPlan") if isinstance(data.get("directionPlan"), dict) else {}
     return {
@@ -482,6 +501,7 @@ def get_original_photos(root: Path, session: str) -> dict:
         "sessionDir": str(folder),
         "sessionJsonPath": str(folder / "session.json"),
         "workKind": work_kind(data),
+        "guidance": guidance(data),
         "capturePlan": plan.get("id"),
         "photoCount": len(photos),
         "notes": [
@@ -493,6 +513,10 @@ def get_original_photos(root: Path, session: str) -> dict:
             "referenceFrameId; objectToWorld of that frame gives the object frame (+Y up, +Z towards the front camera).",
             "Flat artwork (workKind flat): no masks; flat.corners are the sheet's corners in the photo (pixels), "
             "flat.size the measured sheet (null when unknown), flat.rectified the perspective-corrected image.",
+            "Heading-guided capture (guidance heading): referenceFrames[].heading.derivation holds the object centre "
+            "derived after capture (closest point to the photos' centre lines, with residualRmsM), the approximate size "
+            "and origin: 'base' (objectToWorld origin on the table) or 'center' (table height unknown, basePointWorld null, "
+            "origin at the derived centre). photos[].heading keeps the heading/pitch measured while shooting.",
             "Full conventions: docs/data-format.md and captures/README.md.",
         ],
         "referenceFrames": frames,

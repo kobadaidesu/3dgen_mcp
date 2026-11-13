@@ -21,11 +21,11 @@
 
 | ツール | 中身 |
 |---|---|
-| `list_sessions(limit=20)` | 受け取ったセッションを新しい順に。sessionId・タイトル・作品の種類（`workKind`。`object` は立体、`flat` は平面）・撮影方法（`capturePlan`。`ai5` は正面・右・後ろ・左・真上の 5 枚、`flat1` は真上から 1 枚）・写真の数・受信時刻・パック（`for_claude/`）があるか・そのパス |
+| `list_sessions(limit=20)` | 受け取ったセッションを新しい順に。sessionId・タイトル・作品の種類（`workKind`。`object` は立体、`flat` は平面）・立体の撮り方の案内（`guidance`。`heading` は向きで案内して位置と大きさを撮ったあとに求めたもの、`baseCylinder` は底の中心と円柱を先に決めたもの。平面は null）・撮影方法（`capturePlan`。`ai5` は正面・右・後ろ・左・真上の 5 枚、`flat1` は真上から 1 枚）・写真の数・受信時刻・パック（`for_claude/`）があるか・そのパス |
 | `latest_session(received_after=None)` | 一番新しいセッション。`received_after` より後に受け取ったものが無ければ `status: "nothing_new"` |
-| `get_brief(session)` | `brief.md` の本文と、作品の種類（`workKind`）、実寸（`measurements.json`）、見られる写真の一覧（名前・方位と仰角・ピクセルの大きさ・絶対パス）、撮れていない方向。平面の作品は `flat`（使った写真・紙の四隅など）も |
+| `get_brief(session)` | `brief.md` の本文と、作品の種類（`workKind`）、案内のしかた（`guidance`。`heading` なら大きさは撮ったあとに求めたおおよその値で、`measurements.heading` に下と上の目安・信頼度・中心の線の外れ）、実寸（`measurements.json`）、見られる写真の一覧（名前・方位と仰角・ピクセルの大きさ・絶対パス）、撮れていない方向。平面の作品は `flat`（使った写真・紙の四隅など）も |
 | `get_view(session, view, max_side=1568)` | 1 枚の写真を画像で返す（長い辺が `max_side` より大きければ縮める）。パスと方向も返す。`view="overview"` で一覧の画像 |
-| `get_original_photos(session)` | 元の写真（`sessions/<id>/photos/`）のパスと、写真ごとの方向・カメラの姿勢と内部パラメータ・マスクの状態、平面の作品なら紙の四隅・実寸・補正した画像（`rectified/`）（画像そのものは返さない） |
+| `get_original_photos(session)` | 元の写真（`sessions/<id>/photos/`）のパスと、写真ごとの方向・カメラの姿勢と内部パラメータ・マスクの状態、平面の作品なら紙の四隅・実寸・補正した画像（`rectified/`）、向きで案内したセッションなら撮ったときの向き（`photos[].heading`）と基準の `heading`（撮ったあとに求めた中心・大きさ）（画像そのものは返さない） |
 | `rebuild_pack(session, cutouts=false)` | `memoria-pack` でパックを作り直す（受信サーバーと同じ呼び方に `--force`）。`cutouts=true` で背景を透明にした `views/<名前>_cutout.png` も作る |
 | `output_dir(session, label)` | `captures/reconstructions/<sessionId>/<label>/` を作って返す。`label` の `A-Z a-z 0-9 . _ -` 以外の文字は `-` にする |
 | `receiver_status()` | 受信サーバーがポート（既定 8765）で待ち受けているか（接続できるかだけを見る。認証の値は送らない）、`captures/` の場所、セッションの数、`memoria-pack` をビルドしてあるか |

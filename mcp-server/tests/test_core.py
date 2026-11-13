@@ -197,6 +197,8 @@ class FlatTests(CoreTestBase):
         self.assertEqual(kinds[FLAT], "flat")
         self.assertEqual(kinds[AI5], "object")  # no workKind in session.json: object
         self.assertEqual(kinds[NOPACK], "object")
+        guidance = {s["sessionId"]: s["guidance"] for s in core.list_sessions(self.root)["sessions"]}
+        self.assertIsNone(guidance[FLAT])  # flat artwork has no guidance
         latest = core.latest_session(self.root, "2026-11-12T08:00:00+09:00")
         self.assertEqual(latest["session"]["sessionId"], AI5)
         flat = next(s for s in core.list_sessions(self.root)["sessions"] if s["sessionId"] == FLAT)
@@ -234,6 +236,54 @@ class FlatTests(CoreTestBase):
         self.assertEqual(p["flat"]["size"]["widthM"], 0.297)
         self.assertIsNone(p["mask"])
         self.assertIsNone(core.get_original_photos(self.root, AI5)["photos"][0]["flat"])
+
+
+HEADING = "FFFF7777-0000-4000-8000-000000000007"  # heading-guided 3D session (guidance heading)
+
+
+class HeadingTests(CoreTestBase):
+    """A heading-guided session added on top of the base fixtures."""
+
+    def setUp(self):
+        super().setUp()
+        pids = ids(2, "A0000007")
+        photos = [photo(pid, i + 1, az, 15, t) for i, (pid, az, t) in enumerate(zip(pids, (0, 90), ("a000-e15", "a090-e15")))]
+        for p in photos:
+            p["heading"] = {"relativeHeadingDeg": p["direction"]["azimuthDeg"], "pitchDeg": 15.1, "position": "ok",
+                            "estimatedDistanceM": 0.3}
+        make_session(self.root, HEADING, "ai5", photos, "2026-11-12T08:00:00+09:00")
+        folder = self.root / "sessions" / HEADING
+        session = json.loads((folder / "session.json").read_text("utf-8"))
+        session["guidance"] = "heading"
+        session["referenceFrames"][0]["basePointWorld"] = None
+        session["referenceFrames"][0]["heading"] = {"frontHeadingDeg": 7.0, "frontPitchDeg": 15.1, "derivation": {
+            "status": "lowConfidence", "reasons": ["onlyTwoPhotos"], "centerWorld": [0.1, -0.2, -0.4], "residualRmsM": 0.0,
+            "origin": "center", "size": None}}
+        write(folder / "session.json", session)
+        pack = make_pack(self.root, HEADING, [view("front", pids[0], 0, 15), view("right", pids[1], 90, 15)])
+        index = json.loads((pack / "pack.json").read_text("utf-8"))
+        index["workKind"] = "object"
+        index["guidance"] = "heading"
+        write(pack / "pack.json", index)
+        self.sessions_snapshot = self.snapshot(self.root / "sessions")
+
+    def test_summary_brief_and_originals_show_guidance(self):
+        by_id = {s["sessionId"]: s for s in core.list_sessions(self.root)["sessions"]}
+        self.assertEqual(by_id[HEADING]["guidance"], "heading")
+        self.assertEqual(by_id[AI5]["guidance"], "baseCylinder")  # 3D work without the field: the old method
+        brief = core.get_brief(self.root, HEADING)
+        self.assertEqual(brief["guidance"], "heading")
+        self.assertIn("derived after capture", brief["next"])
+        self.assertEqual(core.get_brief(self.root, AI5)["guidance"], "baseCylinder")
+        originals = core.get_original_photos(self.root, HEADING)
+        self.assertEqual(originals["guidance"], "heading")
+        frame = originals["referenceFrames"][0]
+        self.assertIsNone(frame["basePointWorld"])
+        self.assertEqual(frame["heading"]["derivation"]["origin"], "center")
+        self.assertEqual(originals["photos"][1]["heading"]["position"], "ok")
+        self.assertTrue(any("guidance heading" in n for n in originals["notes"]))
+        self.assertIsNone(core.get_original_photos(self.root, AI5)["photos"][0]["heading"])
+        self.assertNoSecrets(brief)
 
 
 class SessionTests(CoreTestBase):
