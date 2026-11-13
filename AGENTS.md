@@ -7,6 +7,7 @@
 子どもの絵や工作を 3D モデルにするときの **入力の写真をそろえる** ためのリポジトリです。iPhone のアプリで作品のまわりを撮り、同じネットワークの Mac へ送り、AI エージェントが読みやすい形にまとめるところまでを持ちます。
 
 - **3D の生成そのものは範囲の外です。** 生成は、Claude Code・Codex などの AI エージェントが、ここで作ったデータを読んで行います。生成のアルゴリズムや特定の生成サービスへの接続は、このリポジトリに入れません。
+- 例外として、**平らな作品（貼り絵・紙に描いた絵）を写真 1 枚から GLB にするツール** `tools/flat-art-glb/` を置いています（ユーザーが決めたもの）。撮影アプリや `for_claude/` の流れとはつながっておらず、写真 1 枚と設定ファイルから単独で動きます。立体の作品の生成は、引き続き範囲の外です。
 - 今の方針（ユーザーが決めたもの）は **「AI に推論させながら作る」** です。底の中心を決めてから、正面・右・後ろ・左の 4 方向と、最後に真上から撮る **5 枚の撮影（`ai5`）** を、新しいセッションの既定にしています。数枚のよい写真から AI が形を推論する前提なので、写真どうしの重なりは要りません。
 - 48 方向の写真測量向けの撮影（`photogrammetry`）や Mac での写真測量のツール（`tools/reconstruct/`）は、実験のために残しています。今の主な流れではありません（下の「決めたこと・分かったこと」）。
 
@@ -19,6 +20,7 @@
 | `receiver/` | Python 3.9 以上（標準ライブラリだけ） | Mac の受信サーバー `memoria_receiver.py`。同じネットワークからの接続だけを受け、`captures/` に保存する。受け取るたびに `memoria-pack` を裏で動かす |
 | `tools/claude-pack/` | Swift（macOS 14 以上） | `memoria-pack`。受け取ったセッションから AI 向けの入力 `captures/for_claude/<sessionId>/` を作る |
 | `tools/reconstruct/` | Swift（Apple シリコンの Mac、macOS 14 以上） | `memoria-reconstruct`。RealityKit の `PhotogrammetrySession` で写真から USDZ を作る実験用のツール |
+| `tools/flat-art-glb/` | Python（numpy・OpenCV・mapbox_earcut）。確かめには Node.js（three・gltf-validator）と Playwright | 平らな作品の写真 1 枚から GLB を作る関数の集まりとコマンド（`flatart_glb.py`）。撮影の流れとは別に単独で動く。説明は `tools/flat-art-glb/README.md` |
 | `docs/` | 取り決め | `data-format.md`（session.json の形・座標・画像の向き・撮影方向の一覧・マスクの確かめ）、`transfer-protocol.md`（iPhone → Mac の転送の手順と、同じネットワークの中だけにする決まり） |
 | `captures/` | 受け取ったデータ（git に入らない） | 受信サーバーが作る。読み方は受信サーバーが起動のたびに書き直す `captures/README.md` |
 
@@ -64,6 +66,7 @@ tools/claude-pack/.build/release/memoria-pack <sessionId の先頭> --force --cu
 (cd tools/claude-pack && swift test)
 (cd tools/reconstruct && swift test)
 python3 -m unittest discover -s receiver/tests
+python3 -m unittest discover -s tools/flat-art-glb/tests   # numpy・OpenCV・mapbox_earcut が要る
 ```
 
 iPhone のアプリのビルド：

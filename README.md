@@ -14,7 +14,7 @@ iPhone で作品のまわりを案内どおりに撮り、写真・作品のマ�
 | 受信サーバー | `receiver/` | Python の標準ライブラリだけで動く Mac の受信サーバー。同じネットワーク（自宅の LAN・USB ケーブル・インターネット共有）からの接続だけを受け、`captures/sessions/` に保存する |
 | AI 向けの入力を作るツール | `tools/claude-pack/` | `memoria-pack`。受け取ったセッションから `captures/for_claude/<sessionId>/`（入口は `brief.md`）を作る。受信サーバーが受け取るたびに自動で動かす |
 
-ほかに、写真測量で 3D にしてみる実験用のツール `tools/reconstruct/` があります。
+ほかに、写真測量で 3D にしてみる実験用のツール `tools/reconstruct/` があります。また、平らな作品（貼り絵・紙に描いた絵）を写真 1 枚から GLB にするツール `tools/flat-art-glb/` があります（撮影アプリの流れとは別に、単独で動きます）。
 
 ## はじめかた
 
@@ -31,6 +31,7 @@ python3 receiver/memoria_receiver.py
 - iPhone → Mac の転送の手順：[docs/transfer-protocol.md](docs/transfer-protocol.md)
 - AI 向けの入力の中身：[tools/claude-pack/README.md](tools/claude-pack/README.md)
 - 写真測量のツール：[tools/reconstruct/README.md](tools/reconstruct/README.md)
+- 平らな作品を GLB にするツール：[tools/flat-art-glb/README.md](tools/flat-art-glb/README.md)
 
 ## 注意
 
