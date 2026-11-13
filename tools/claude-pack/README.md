@@ -63,17 +63,27 @@ pack.json           workKind "flat"、views（artwork・photo）、flat（使っ
 
 ### 向きと写真の選び方
 
-**AI 用 5 方向（`directionPlan.id` が `ai5`）のセッション**：向きは `front`・`right`・`back`・`left`（それぞれ `a000-e15`・`a090-e15`・`a180-e15`・`a270-e15`）と `top`（`top-e90`、方位は問わない）の 5 つだけです。それぞれ、その方向として撮った写真（`direction.targetId` が同じ）を一番に選びます。`top` は仰角 60° 以上（アプリは 75° 以上で撮る）。
+**AI 用 5 方向（`directionPlan.id` が `ai5`）のセッション**：向きは `front`・`right`・`back`・`left`（それぞれ `a000-e15`・`a090-e15`・`a180-e15`・`a270-e15`）と `top`（`top-e90`、方位は問わない）の 5 つだけです。それぞれ、その方向として撮った写真（`direction.targetId` が同じ）を一番に選びます（その写真は、撮ったあとに求め直した方位・仰角が向きの許容から外れていても選ぶ）。`top` は仰角 60° 以上（アプリは 75° 以上で撮る）。
 
 ほかのセッション：向きは `front`（方位 0°）・`front_right`（45°）・`right`（90°）・`back_right`（135°）・`back`（180°）・`back_left`（225°）・`left`（270°）・`front_left`（315°）を一番低い段（撮影方向の一覧の一番低い仰角、今は 20°）で、`top`（仰角 70° に一番近い写真。40° 以上、かつ一番低い段 ＋ 20° 以上）、`front_high`（方位 0°・仰角 45°）。
 
 - 必ず守ること：方向が確定（`direction.confirmed`）、方向の確定した写真が一番多い基準（`referenceFrameId`。同じ数なら後の基準）、置き換え済みでない（アプリと同じ決まり）、許容の中（低い段は方位 ±25°・仰角 ±15°、`front_high` は仰角 ±12°）。
 - その中で、使える切り抜き（`confirmed`、または `candidate` で `check` が `ok`）→ 確かめていない切り抜き（`check` の無い前の版）→ 使えない切り抜き、の順。次に保存した写真の画質（`quality.saved` の blur・brightness が ok）、次に角度の近さ。1 枚の写真は 1 つの向きにだけ使う。
-- 切り抜く範囲：マスクの外接長方形に、長い辺の 20% の余白を足し、縦横比を 4:3 以内に広げ、写真の内側へずらす。マスクが使えないときは、作品の円柱を投影した範囲（`MaskCropPlanner.projectObject`）。
+- 切り抜く範囲：マスクの外接長方形に、長い辺の 20% の余白を足し、縦横比を 4:3 以内に広げ、写真の内側へずらす。マスクが使えないときは、作品の円柱を投影した範囲（`MaskCropPlanner.projectObject`）。向きで案内したセッションは、撮ったあとに求めた大きさの箱を投影した範囲（`cropSource: "projectedDerivedBox"`）、大きさも分からなければ写真の中央（十字）のまわりの正方形（`"crosshairCenter"`）。
+
+### 向きで案内したセッション（`guidance` が `heading`）
+
+撮るときに底の中心・円柱を決めていないので、円柱の目安はありません。作品の中心・作品座標・おおよその大きさは、撮ったあとに写真から求めた値（session.json の `referenceFrames[].heading.derivation`。決まりは [docs/data-format.md](../../docs/data-format.md) の「向きで案内する撮影」）を使います。iPhone がまだ求めていない（切り抜きを作っている間に送ったなど）ときは、`memoria-pack` が同じ計算（CaptureCore の `HeadingSizer.refresh`）をメモリの中で行います（session.json は書き換えない。`measurements.json` の `heading.computedBy` が `"memoria-pack"`）。
+
+- `measurements.json`：`method: "headingDerived"`。大きさが分かれば `status: "approximate"`、`sizeM`・`sizeCm`（下の目安＝箱の当てはめ と 上の目安＝中心の面での広がり の幾何平均）、`confidence`（`normal` | `low`）と `confidenceReasons`、`bboxMinM`・`bboxMaxM`（大きさの箱）。分からなければ `status: "unavailable"` と `unavailableReason`（数字は書かない）。`heading` に中心の求め方（`derivationStatus`・線の外れ `residualRmsM`・使った写真・原点 `origin`）と大きさの全部（`lowerM`・`upperM`・`crossChecks` など）。
+- 座標：x・z の原点は求めた中心、y = 0 は机の面（`origin: "base"`。ARKit で測れたとき）か、**求めた中心の高さ**（`origin: "center"`。机の高さが分からない。底ではない）。+Z は正面の写真の向きの反対。
+- visual hull は作りません（`hull.obj` なし）。
+- `brief.md` には、位置と大きさが撮ったあとに求めた値であること、線の外れ（2 cm 以下ならおおむね合っている）、机の面が分かったか、下と上の目安、信頼度が低い理由を書きます。
+- `pack.json` の `guidance` に案内のしかた（`heading` | `baseCylinder`、平面は null）を書きます。
 
 ### 実寸の測り方（visual hull）
 
-使えるマスクのある写真が 8 枚未満（ai5 の 5 枚など）のときは hull を作りません（数枚の輪郭から削った箱は、見かけより不確かなため）。代わりに、撮影時にユーザーが AR のガイドで合わせた円柱（直径 × 直径 × 高さ）を `status: "approximate"`・`method: "userCylinder"`・`confidence: "low"` で書き、`brief.md` にも「目安。実測ではありません」と書きます。`hull.obj` は作りません。
+向きで案内したセッションは上の決まりです。それ以外で、使えるマスクのある写真が 8 枚未満（ai5 の 5 枚など）のときは hull を作りません（数枚の輪郭から削った箱は、見かけより不確かなため）。代わりに、撮影時にユーザーが AR のガイドで合わせた円柱（直径 × 直径 × 高さ）を `status: "approximate"`・`method: "userCylinder"`・`confidence: "low"` で書き、`brief.md` にも「目安。実測ではありません」と書きます。`hull.obj` は作りません。
 
 1. 多数派の基準の、追跡が `normal` で使える（または確かめていない）マスクのある写真を全部使う（白いマウスでは 49 枚）。マスクは 1/4（長い辺 1008 px）に縮める。
 2. 基準の円柱（`referenceFrames[].object`、無ければ `object`）の半径・高さの 1.3 倍の範囲を 2 mm のボクセルに分け（多すぎると 160³ を上限に粗くする）、基準点の下にも半径の半分まで広げる。
@@ -97,6 +107,6 @@ pack.json           workKind "flat"、views（artwork・photo）、flat（使っ
 ## 確認
 
 ```sh
-swift test   # 写真の選び方（角度・切り抜き・置き換え済み・基準・ai5 の 5 方向）、切り抜きと回転の計算と画素、透明の cutout、合成した箱の visual hull（大きさ・机の面）、
+swift test   # 写真の選び方（角度・切り抜き・置き換え済み・基準・ai5 の 5 方向）、向きで案内したセッションの出力（中心と大きさをここで求める・iPhone の値を使う・マスクが無いと大きさ不明で中央を切り抜く）、切り抜きと回転の計算と画素、透明の cutout、合成した箱の visual hull（大きさ・机の面）、
              # 5 方向のセッションの出力（背景付きの写真だけ・円柱の目安・--cutouts）、平面の作品の出力（補正した絵・実寸・大きさ不明）、JSON の形
 ```

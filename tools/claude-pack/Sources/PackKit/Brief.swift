@@ -26,7 +26,7 @@ public enum Brief {
         var notes: [String] = []
         switch c.maskUse {
         case .unchecked?: notes.append("切り抜きは確かめていない（古いセッション）")
-        case .unusable?: notes.append("使える切り抜きなし（切り抜く範囲は作品の円柱の投影から）")
+        case .unusable?: notes.append(session.usesHeadingGuidance ? "使える切り抜きなし" : "使える切り抜きなし（切り抜く範囲は作品の円柱の投影から）")
         default: break
         }
         if let id = c.photoId, let p = session.photo(id: id) {
@@ -49,6 +49,11 @@ public enum Brief {
             }
         }
         if c.cropSource == "projectedCylinder" { notes.append("切り抜き範囲は円柱の投影から") }
+        if c.cropSource == "projectedDerivedBox" { notes.append("切り抜き範囲は撮ったあとに求めた大きさの箱の投影から") }
+        if c.cropSource == "crosshairCenter" { notes.append("切り抜き範囲は写真の中央（十字のまわり）") }
+        if let id = c.photoId, let p = session.photo(id: id), let h = p.heading, p.direction.targetId == nil {
+            notes.append(h.position == .notWalkedAround ? "その場で回して撮った写真かもしれない" : "狙った向きの外で撮った写真")
+        }
         return notes
     }
 
@@ -99,6 +104,69 @@ public enum Brief {
         }
     }
 
+    static let headingSizeReasonJa: [HeadingSizeReason: String] = [
+        .noCenter: "作品の中心が分からない",
+        .notEnoughMasks: "使える切り抜きが足りない",
+        .maskTouchesImageEdge: "切り抜きが写真の端に届いている（作品がはみ出しているかもしれない）",
+        .poorFit: "箱が切り抜きにうまく合わない（切り抜きの誤り・十字に合わせていない写真・位置のずれ）",
+        .oppositeViewsDisagree: "向かい合う写真で測った長さが大きく違う",
+        .centerLowConfidence: "作品の中心の求め方の信頼度が低い",
+        .shapeDependent: "下の目安と上の目安が大きく違う（作品の形しだいで変わる寸法がある）",
+        .fitFailed: "箱を求められない",
+    ]
+
+    static let derivationReasonJa: [String: String] = [
+        "noFront": "正面の写真が無い", "tooFewPhotos": "写真が足りない", "onlyTwoPhotos": "写真が 2 枚だけ",
+        "nearParallelAxes": "写真の中心の線がほぼ平行", "behindCamera": "交わる点がカメラの後ろ",
+        "largeResidual": "線が大きく外れている", "outlierExcluded": "大きく外れた 1 枚を除いた",
+    ]
+
+    /// 向きで案内したセッション：大きさ（おおよそ）と、撮ったあとに求めた位置・大きさの説明。
+    static func headingSections(_ m: Measurements, session: CaptureSession, into out: inout [String]) {
+        let h = m.heading
+        if let s = m.sizeCm {
+            out.append("## 大きさ（おおよそ。撮ったあとに写真から求めた値）")
+            out.append("")
+            out.append("| 幅（X、左右） | 奥行き（Z、前後） | 高さ（Y、上下） | 信頼度 |")
+            out.append("|---|---|---|---|")
+            out.append("| \(f1(s.width)) cm | \(f1(s.depth)) cm | \(f1(s.height)) cm | \(m.confidence == "normal" ? "ふつう" : "低い") |")
+            out.append("")
+            if let size = h?.size, let lo = size.lowerM, let hi = size.upperM {
+                out.append("- 下の目安（箱の当てはめ。角ばった物ではほぼ正しく、丸い物では小さく出る）：\(f1(lo.widthM * 100)) × \(f1(lo.depthM * 100)) × \(f1(lo.heightM * 100)) cm")
+                out.append("- 上の目安（中心の面での広がり。丸い物では近く、角ばった物では大きく出る）：\(f1(hi.widthM * 100)) × \(f1(hi.depthM * 100)) × \(f1(hi.heightM * 100)) cm")
+                out.append("- 表の値は 2 つの幾何平均です。どちらも、iPhone の切り抜き（マスク）の外接長方形と、写真ごとのカメラの位置（ARKit）から求めました。撮るときには大きさを合わせていません。")
+                if !size.reasons.isEmpty {
+                    out.append("- **信頼度が低い理由**：\(size.reasons.map { headingSizeReasonJa[$0] ?? $0.rawValue }.joined(separator: "、"))。写真と見比べてください（特に高さ）。")
+                }
+            }
+        } else {
+            out.append("## 大きさ（分かりません）")
+            out.append("")
+            out.append("大きさは求められませんでした：\(m.unavailableReason ?? "理由不明")。写真から推測するしかありません（推測したことを結果に書いてください）。")
+        }
+        out.append("")
+        out.append("## 撮り方（向きで案内）と、撮ったあとに求めたもの")
+        out.append("")
+        out.append("このセッションは、作品を画面の中央の十字に合わせて正面を撮り、iPhone の向きが 90°・180°・270° 回った位置（右・後ろ・左）と真上から撮る方法（`guidance: heading`）で撮りました。"
+                   + "撮るときに底の中心・作品の大きさは決めていません。**作品の位置と大きさは、撮ったあとに写真から求めた値です。**")
+        out.append("")
+        guard let h else { return }
+        if let c = h.centerWorld, c.count == 3 {
+            let reasons = h.reasons.map { derivationReasonJa[$0] ?? $0 }
+            out.append("- 作品の中心：写真 \(h.photoIds.count) 枚の画面の中心を通る線に一番近い点。線がその点から外れている距離は二乗平均 \(f1((h.residualRmsM ?? 0) * 100)) cm・最大 \(f1((h.residualMaxM ?? 0) * 100)) cm"
+                       + "（十字に作品を合わせられていない写真や、位置のずれがあると大きくなる。2 cm 以下ならおおむね合っている）。"
+                       + (h.derivationStatus == "ok" ? "" : "**当てにしにくい**（\(reasons.joined(separator: "、"))）。"))
+            if !h.excludedPhotoIds.isEmpty { out.append("- 大きく外れていたので中心の計算から除いた写真：\(h.excludedPhotoIds.map { "`\($0)`" }.joined(separator: "、"))") }
+        } else {
+            out.append("- 作品の中心は求められませんでした（\(h.reasons.map { derivationReasonJa[$0] ?? $0 }.joined(separator: "、"))）。")
+        }
+        out.append(h.origin == "base"
+                   ? "- 机の面：作品の下の面を ARKit で測りました（求め方：\(m.baseSource.flatMap { baseSourceJa[$0] } ?? "記録なし")）。y = 0 がその面です。"
+                   : "- 机の面：**高さは分かりません**（撮影中に ARKit の平面・特徴点で作品の下の面を測れなかった）。y = 0 は求めた中心の高さです。")
+        out.append("- 写真ごとの方位・仰角・距離は、求めた中心から測った値です（撮るときに狙ったのは、正面からの iPhone の向きの差と見下ろす角度）。")
+        out.append("- 計算した場所：\(h.computedBy == "iPhone" ? "iPhone（送る前）" : "Mac の memoria-pack（session.json にまだ無かったため）")")
+    }
+
     public static func markdown(session: CaptureSession, provenance: PackIndex.Provenance, choices: [ViewChoice],
                                 measurements m: Measurements, coverage: PackIndex.Coverage, maskIssues: [PackIndex.MaskIssue],
                                 cutouts: Bool = false) -> String {
@@ -116,7 +184,9 @@ public enum Brief {
         out.append("")
 
         // Size
-        if m.method == "userCylinder", let s = m.sizeCm {
+        if m.method == "headingDerived" {
+            headingSections(m, session: session, into: &out)
+        } else if m.method == "userCylinder", let s = m.sizeCm {
             out.append("## 大きさ（目安。実測ではありません）")
             out.append("")
             out.append("| 直径（幅・奥行き） | 高さ | 求め方 |")
@@ -138,12 +208,19 @@ public enum Brief {
         // Axes
         out.append("## モデルの座標")
         out.append("")
-        if m.method == "userCylinder" {
+        if m.method == "headingDerived" {
+            let base = m.heading?.origin == "base"
+            out.append("- 単位はメートル。+Y が上。x・z の原点は撮ったあとに求めた作品の中心（写真の中心の線が交わる点）、"
+                       + (base ? "y = 0 は作品の下の机の面（ARKit で測った面）。" : "y = 0 はその中心の高さ（**机の高さは分かりません**。底ではありません。おおよその底は `measurements.json` の `bboxMinM` の y）。")
+                       + "`measurements.json` も同じ座標です。")
+        } else if m.method == "userCylinder" {
             out.append("- 単位はメートル。+Y が上、原点は撮影時の基準点（作品の底の中心として測った点。y = 0 がおよそ机の面）。`measurements.json` も同じ座標です。")
         } else {
             out.append("- 単位はメートル。+Y が上、y = 0 は机の面。x・z の原点は撮影時の基準点（作品の底の中心のあたり）。`hull.obj` と `measurements.json` も同じ座標です。")
         }
-        out.append("- +Z が正面（`views/front.jpg` を撮ったカメラの方向。正面の写真は −Z の向きに作品を見ている）。+X は正面から見て右。")
+        out.append(m.method == "headingDerived"
+                   ? "- +Z が正面（正面の写真を撮ったときの iPhone の向きの反対。正面の写真は −Z の向きに作品を見ている）。+X は正面から見て右。"
+                   : "- +Z が正面（`views/front.jpg` を撮ったカメラの方向。正面の写真は −Z の向きに作品を見ている）。+X は正面から見て右。")
         out.append("- 写真の「方位」は作品のまわりの角度（0° = 正面、90° = 右、180° = 後ろ、270° = 左）、「仰角」は見下ろす角度です。")
         out.append("")
 
@@ -213,12 +290,18 @@ public enum Brief {
         out.append("1. `overview.jpg` で全体の形・色・向きをつかむ。")
         out.append("2. 形・色・模様・細部は `views/<向き>.jpg`（\(named ? "正面・右・後ろ・左・真上" : "正面・横・後ろ・上")）で見る。写真には背景（机・まわりの物）も写っています。作品は真ん中の物です。"
                    + (cutouts ? "作品だけの輪郭は `views/*_cutout.png`（透明の PNG）でも確かめられます。" : ""))
-        if m.method == "userCylinder" {
+        if m.method == "headingDerived" {
+            out.append(m.sizeCm == nil
+                       ? "3. 大きさは分かりません。写真から推測し、推測した大きさは結果に書く。"
+                       : "3. 大きさは上のおおよその値（`measurements.json` の `sizeM`。下の目安 `heading.size.lowerM`〜上の目安 `upperM`）を参考に、写真と見比べて決める。信頼度が低い寸法は写真を優先し、決めた大きさは結果に書く。")
+        } else if m.method == "userCylinder" {
             out.append("3. 大きさは上の円柱（目安・上限）を参考に、写真から推測する。推測した大きさは結果に書く。")
         } else {
             out.append("3. 大きさは上の実測（`measurements.json` の `sizeM`）に合わせる。`hull.obj` を読み込んで、外形がその中に収まるように作ると位置と大きさがそろう。")
         }
-        out.append("4. 正面は +Z、上は +Y、単位はメートル、y = 0 が机の面。")
+        out.append(m.method == "headingDerived" && m.heading?.origin != "base"
+                   ? "4. 正面は +Z、上は +Y、単位はメートル。y = 0 は求めた中心の高さ（机の面ではない）。"
+                   : "4. 正面は +Z、上は +Y、単位はメートル、y = 0 が机の面。")
         out.append("5. 写っていない所（底面、上の「写真の無い向き」）は推測になります。推測した部分は結果に書いてください。")
         out.append("")
         out.append("**これらの画像を Claude やほかのクラウドのツールに渡すことは外部への送信にあたります。** 子どもの作品とまわりが写った個人の写真です。送るかどうかはユーザーが決めます。")

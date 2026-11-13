@@ -544,6 +544,143 @@ final class PackKitTests: XCTestCase {
         XCTAssertTrue(try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8).contains("_cutout.png"))
     }
 
+    // MARK: - heading-guided capture (guidance heading)
+
+    /// A heading-guided ai5 session on disk: 5 photos (front, right, back, left, top) of a 10 × 6 × 4 cm box around
+    /// `center`, recorded with `PhotoRecorder.makeHeadingPhoto`; masks are the projected box (or failed with `masks: false`).
+    func writeHeadingSession(root: URL, masks: Bool = true, derivedOnPhone: Bool = false) throws -> LocatedSession {
+        let folder = root.appendingPathComponent("sessions/S", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("photos"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: folder.appendingPathComponent("masks"), withIntermediateDirectories: true)
+        let W = 320, H = 240
+        let K = simd_double3x3(rows: [SIMD3(280, 0, 160), SIMD3(0, 280, 120), SIMD3(0, 0, 1)])
+        let center = SIMD3<Double>(0.1, -0.2, -0.4)
+        func lookAt(_ p: SIMD3<Double>) -> simd_double4x4 {
+            let f = simd_normalize(center - p)
+            var r = simd_cross(f, SIMD3(0, 1, 0))
+            if simd_length(r) < 1e-6 { r = SIMD3(1, 0, 0) }
+            r = simd_normalize(r)
+            let u = simd_cross(r, f)
+            return simd_double4x4(columns: (SIMD4(r, 0), SIMD4(u, 0), SIMD4(-f, 0), SIMD4(p, 1)))
+        }
+        var s = CaptureSession(sessionId: "S", title: "はこ", createdAt: Date(timeIntervalSince1970: 0),
+                               device: DeviceInfo(model: "", systemName: "iOS", systemVersion: "", appVersion: "", appBuild: ""),
+                               directionPlan: DirectionPlanPreset.ai5.plan, workKind: .object, guidance: .heading)
+        var frontHeading: Double?
+        for (i, (az, el)) in [(0.0, 15.0), (90, 15), (180, 15), (270, 15), (30, 86)].enumerated() {
+            let a = az * .pi / 180, e = el * .pi / 180
+            let m = lookAt(center + 0.35 * SIMD3(sin(a) * cos(e), sin(e), cos(a) * cos(e)))
+            let frame = CapturedFrameInfo(cameraToWorld: m, intrinsics: K, intrinsicsResolution: PixelSize(width: W, height: H),
+                                          imageSize: PixelSize(width: W, height: H), timestamp: Double(i), exposureDuration: nil, exposureOffset: nil,
+                                          trackingState: .normal, trackingReason: nil)
+            let context = CaptureContext(trigger: i == 0 ? .manual : .auto, referenceFrameId: s.referenceFrames.last?.id, liveQuality: .unknown,
+                                         deviceOrientation: "landscapeLeft", displayRotationDegClockwise: 0, capturedAt: Date(timeIntervalSince1970: Double(i)))
+            var p = PhotoRecorder.makeHeadingPhoto(in: &s, photoId: Self.pid(i + 1), sequence: i + 1, frame: frame, context: context)
+            frontHeading = frontHeading ?? s.referenceFrames.last?.heading?.frontHeadingDeg
+            XCTAssertNotNil(p.direction.targetId, "photo \(i)")
+            p.quality.saved = SavedQuality(meanLuma: 0.5, sharpness: 0.01, brightness: .ok, blur: .ok)
+            try ImageOps.writeJPEG(ImageOps.makeGrayImage(GrayImage(width: W, height: H, fill: 150))!, to: folder.appendingPathComponent(p.image.file))
+            if masks {
+                let o2w = HeadingDeriver.objectToWorld(center: center, frontHeadingDeg: frontHeading!, originY: center.y)
+                let camera = CameraModel(cameraToWorld: m, intrinsics: K, imageWidth: Double(W), imageHeight: Double(H))
+                var xs: [Double] = [], ys: [Double] = []
+                for c in 0..<8 {
+                    let q = o2w * SIMD4(c & 1 == 0 ? -0.05 : 0.05, c & 2 == 0 ? -0.02 : 0.02, c & 4 == 0 ? -0.03 : 0.03, 1)
+                    let px = camera.project(SIMD3(q.x, q.y, q.z))!
+                    xs.append(px.x); ys.append(px.y)
+                }
+                var mask = GrayImage(width: W, height: H)
+                for y in Int(ys.min()!.rounded())..<Int(ys.max()!.rounded()) { for x in Int(xs.min()!.rounded())..<Int(xs.max()!.rounded()) { mask[x, y] = 255 } }
+                try ImageOps.writePNG(ImageOps.makeGrayImage(mask)!, to: folder.appendingPathComponent(Photo.maskPath(photoId: p.photoId)))
+                p.mask = MaskInfo(status: .candidate, file: Photo.maskPath(photoId: p.photoId), width: W, height: H, method: MaskInfo.visionMethod,
+                                  instanceCount: 1, selectedInstances: [1], selection: .auto, check: MaskCheck(status: .ok, reasons: []))
+                    .recording(MaskCropPlanner.crosshairPlan(imageWidth: W, imageHeight: H))
+            } else {
+                p.mask = .failed("noObject")
+            }
+            s.photos.append(p)
+        }
+        if derivedOnPhone {
+            HeadingSizer.refresh(session: &s) { photo in
+                guard let f = photo.mask.file, let m = try? ImageOps.loadMask(folder.appendingPathComponent(f)) else { return nil }
+                return MaskBounds.of(pixels: m.pixels, width: m.width, height: m.height)
+            }
+        }
+        return LocatedSession(folder: folder, dataDir: root, session: s, receipt: nil)
+    }
+
+    func testHeadingPackageDerivesCenterAndApproximateSize() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-heading-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let located = try writeHeadingSession(root: root)
+        XCTAssertNil(located.session.referenceFrames.last?.heading?.derivation)  // not derived on the "phone"
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        let summary = try PackBuilder(located: located).build(into: out)
+        XCTAssertTrue(summary.contains("derived after capture"), summary)
+        // The session folder is never written.
+        let onDisk = try? Data(contentsOf: located.folder.appendingPathComponent("session.json"))
+        XCTAssertNil(onDisk)
+
+        let files = try FileManager.default.contentsOfDirectory(atPath: out.appendingPathComponent("views").path).sorted()
+        XCTAssertEqual(files, ["back.jpg", "front.jpg", "left.jpg", "right.jpg", "top.jpg"])
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m.method, "headingDerived")
+        XCTAssertEqual(m.status, "approximate")
+        let h = try XCTUnwrap(m.heading)
+        XCTAssertEqual(h.computedBy, "memoria-pack")
+        XCTAssertEqual(h.derivationStatus, "ok")
+        XCTAssertEqual(h.origin, "center")
+        XCTAssertLessThan(h.residualRmsM!, 0.001)
+        let size = try XCTUnwrap(h.size)
+        XCTAssertEqual(size.lowerM!.widthM, 0.10, accuracy: 0.01)
+        XCTAssertEqual(size.lowerM!.depthM, 0.06, accuracy: 0.01)
+        XCTAssertEqual(size.lowerM!.heightM, 0.04, accuracy: 0.01)
+        let s = try XCTUnwrap(m.sizeM)
+        XCTAssertGreaterThanOrEqual(s.width, size.lowerM!.widthM - 1e-6)
+        XCTAssertLessThanOrEqual(s.width, size.upperM!.widthM + 1e-6)
+        XCTAssertNotNil(m.confidence)
+        XCTAssertNil(m.mesh)
+        XCTAssertTrue(m.frame["origin"]!.contains("NOT the bottom"))
+
+        let index = try JSONDecoder().decode(PackIndex.self, from: Data(contentsOf: out.appendingPathComponent("pack.json")))
+        XCTAssertEqual(index.guidance, "heading")
+        XCTAssertEqual(index.views.map(\.name), ["front", "right", "back", "left", "top"])
+        XCTAssertTrue(index.views.allSatisfy { $0.cropSource == "maskBoundingBox" })
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("撮ったあとに写真から求めた値"))
+        XCTAssertTrue(brief.contains("机の高さは分かりません"))
+        XCTAssertTrue(brief.contains("Mac の memoria-pack"))
+        XCTAssertFalse(brief.contains("円柱"))
+
+        // Derived on the phone: the pack uses it as is.
+        let phone = try writeHeadingSession(root: root.appendingPathComponent("phone"), derivedOnPhone: true)
+        XCTAssertNotNil(phone.session.referenceFrames.last?.heading?.derivation?.size)
+        let out2 = root.appendingPathComponent("phone/for_claude/S", isDirectory: true)
+        _ = try PackBuilder(located: phone).build(into: out2)
+        let m2 = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out2.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m2.heading?.computedBy, "iPhone")
+        XCTAssertEqual(m2.sizeM, m.sizeM)
+    }
+
+    func testHeadingPackageWithoutMasksHasNoSizeAndCentredCrops() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("pack-heading-nomask-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let located = try writeHeadingSession(root: root, masks: false)
+        let out = root.appendingPathComponent("for_claude/S", isDirectory: true)
+        let summary = try PackBuilder(located: located).build(into: out)
+        XCTAssertTrue(summary.contains("size unavailable"), summary)
+        let m = try JSONDecoder().decode(Measurements.self, from: Data(contentsOf: out.appendingPathComponent("measurements.json")))
+        XCTAssertEqual(m.method, "headingDerived")
+        XCTAssertEqual(m.status, "unavailable")
+        XCTAssertNil(m.sizeM)
+        XCTAssertEqual(m.heading?.size?.status, "unknown")
+        XCTAssertNotNil(m.heading?.centerWorld)  // the centre needs only the poses
+        let index = try JSONDecoder().decode(PackIndex.self, from: Data(contentsOf: out.appendingPathComponent("pack.json")))
+        XCTAssertTrue(index.views.allSatisfy { $0.cropSource == "crosshairCenter" }, "\(index.views.map(\.cropSource))")
+        let brief = try String(contentsOf: out.appendingPathComponent("brief.md"), encoding: .utf8)
+        XCTAssertTrue(brief.contains("大きさ（分かりません）"))
+    }
+
     // MARK: - flat artwork (workKind flat, plan flat1)
 
     func flatPhoto(_ seq: Int, el: Double = 86, rectified: Bool, corners: Bool = true, size: Bool = true, W: Int = 64, H: Int = 48) -> Photo {

@@ -3,7 +3,7 @@ import CaptureCore
 
 public enum PackInfo {
     public static let toolName = "memoria-pack"
-    public static let toolVersion = "0.3.0"
+    public static let toolVersion = "0.4.0"
 }
 
 public struct Size3: Codable, Equatable, Sendable {
@@ -68,6 +68,37 @@ public struct Measurements: Codable, Sendable {
         public var photoId: String
     }
 
+    /// Heading-guided sessions (`guidance: "heading"`): how the object centre and the approximate size were derived after capture.
+    public struct HeadingInfo: Codable, Equatable, Sendable {
+        /// "ok" | "lowConfidence" | "unknown" (the object centre).
+        public var derivationStatus: String
+        public var reasons: [String]
+        @NullCodable public var centerWorld: [Double]?
+        @NullCodable public var residualRmsM: Double?
+        @NullCodable public var residualMaxM: Double?
+        public var photoIds: [String]
+        public var excludedPhotoIds: [String]
+        /// "base" (y = 0 is the table under the object) | "center" (table height unknown; y = 0 is the centre's height).
+        @NullCodable public var origin: String?
+        /// The size estimate as derived (lowerM / upperM / crossChecks …). null when not computed.
+        @NullCodable public var size: HeadingSizeEstimate?
+        /// "iPhone" (from session.json) | "memoria-pack" (derived here because the session had none yet).
+        public var computedBy: String
+
+        public init(derivation d: HeadingDerivation, computedBy: String) {
+            derivationStatus = d.status.rawValue
+            reasons = d.reasons.map(\.rawValue)
+            centerWorld = d.centerWorld.map { [$0.simd.x, $0.simd.y, $0.simd.z] }
+            residualRmsM = d.residualRmsM
+            residualMaxM = d.residualMaxM
+            photoIds = d.photoIds
+            excludedPhotoIds = d.excludedPhotoIds
+            origin = d.origin?.rawValue
+            size = d.size
+            self.computedBy = computedBy
+        }
+    }
+
     public var schema = "memoria.claude-pack.measurements"
     public var schemaVersion = 1
     public var sessionId: String
@@ -79,6 +110,7 @@ public struct Measurements: Codable, Sendable {
     public var status: String
     @NullCodable public var unavailableReason: String?
     /// "visualHull" | "userCylinder" (the cylinder fitted with the AR guide during capture, not a measurement)
+    /// | "headingDerived" (heading-guided capture: approximate size derived after capture from masks and poses; see `heading`)
     /// | "flatSheetCorners" (flat artwork: the sheet's corners projected onto an ARKit plane; see `sheet`)
     public var method = "visualHull"
     public var frame: [String: String] = [
@@ -120,6 +152,8 @@ public struct Measurements: Codable, Sendable {
     /// The cylinder the user fitted with the AR guide (the search box is this × 1.3).
     @NullCodable public var userCylinder: ObjectSize?
     @NullCodable public var baseSource: String?
+    /// Heading-guided sessions only (null otherwise).
+    @NullCodable public var heading: HeadingInfo?
     @NullCodable public var mesh: Mesh?
     public var caveats: [String] = []
     public var seconds: Double = 0
@@ -192,6 +226,9 @@ public struct PackIndex: Codable, Sendable {
     public var schemaVersion = 1
     /// "object" | "flat". Missing in packages before 0.3.0 (they are all "object").
     public var workKind: String?
+    /// "heading" | "baseCylinder" for 3D work (how the capture was guided; session.json `guidance`), null for flat artwork.
+    /// Missing in packages before 0.4.0.
+    public var guidance: String?
     public var provenance: Provenance
     public var title: String
     public var views: [ViewChoice]

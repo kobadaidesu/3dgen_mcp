@@ -186,7 +186,11 @@ public enum ViewSelector {
         for slot in slots {
             var best: (key: [Double], photo: Photo, use: MaskUse)?
             for photo in pool where !used.contains(photo.photoId) {
-                guard let score = angleScore(slot: slot, azimuth: photo.direction.azimuthDeg!, elevation: photo.direction.elevationDeg!) else { continue }
+                // A photo the app matched to the slot's own target is eligible even when its (later derived) angles fall
+                // outside the slot (heading-guided sessions recompute the angles from the derived centre after capture).
+                let ownTarget = slot.targetId != nil && slot.targetId == photo.direction.targetId
+                guard let score = angleScore(slot: slot, azimuth: photo.direction.azimuthDeg!, elevation: photo.direction.elevationDeg!)
+                        ?? (ownTarget ? 1 : nil) else { continue }
                 let use = MaskUse.of(photo, fileExists: maskFileExists(photo))
                 // A photo shot for the slot's own target comes first (ai5: the top-e90 photo is the top view).
                 let offTarget: Double = slot.targetId.map { $0 == photo.direction.targetId ? 0 : 1 } ?? 0

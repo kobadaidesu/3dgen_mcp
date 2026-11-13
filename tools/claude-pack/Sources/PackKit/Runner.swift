@@ -99,7 +99,12 @@ public enum Runner {
 /// Builds the package in a temporary folder next to the destination and swaps it in.
 public final class PackBuilder {
     let located: LocatedSession
-    var session: CaptureSession { located.session }
+    /// The session as received, except that for a heading-guided session (`guidance: "heading"`) the centre, object frame
+    /// and approximate size are derived here when the iPhone has not (yet) written them (`HeadingSizer.refresh`, the same
+    /// CaptureCore code the app runs). Only this in-memory copy is changed; the session folder is never written.
+    let session: CaptureSession
+    /// For heading-guided sessions: whether this tool (not the iPhone) derived the centre or the size.
+    var headingComputedHere = false
     var timings: [String: Double] = [:]
     public var hullSettings = HullSettings()
     /// Write `views/<name>_cutout.png` (`--cutouts`).
@@ -112,6 +117,15 @@ public final class PackBuilder {
 
     public init(located: LocatedSession) {
         self.located = located
+        var session = located.session
+        if session.usesHeadingGuidance {
+            let folder = located.folder
+            headingComputedHere = HeadingSizer.refresh(session: &session) { photo in
+                guard let f = photo.mask.file, let m = try? ImageOps.loadMask(folder.appendingPathComponent(f), maxSide: 1008) else { return nil }
+                return MaskBounds.of(pixels: m.pixels, width: m.width, height: m.height)
+            }
+        }
+        self.session = session
     }
 
     func timed<T>(_ name: String, _ body: () throws -> T) rethrows -> T {
@@ -197,15 +211,23 @@ public final class PackBuilder {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
         try encoder.encode(measurements).write(to: dir.appendingPathComponent("measurements.json"))
-        let index = PackIndex(workKind: session.workKind.rawValue, provenance: provenance, title: session.title, views: choices,
+        var index = PackIndex(workKind: session.workKind.rawValue, provenance: provenance, title: session.title, views: choices,
                               coverage: coverage, maskIssues: maskIssues, files: files, timingsS: timings)
+        index.guidance = session.captureGuidance?.rawValue
         try encoder.encode(index).write(to: dir.appendingPathComponent("pack.json"))
 
         let shown = choices.filter { !$0.isMissing }.count
-        let size = measurements.method == "userCylinder"
+        let size = measurements.method == "headingDerived"
+            ? measurements.sizeCm.map { String(format: "approx. W %.1f × D %.1f × H %.1f cm (derived after capture, %@ confidence)", $0.width, $0.depth, $0.height, measurements.confidence ?? "?") }
+                ?? "size unavailable (\(measurements.unavailableReason ?? "?"))"
+            : measurements.method == "userCylinder"
             ? measurements.sizeCm.map { String(format: "approx. ⌀ %.1f × H %.1f cm (user cylinder, not measured)", $0.width, $0.height) } ?? "size unavailable"
             : measurements.sizeCm.map { String(format: "W %.1f × D %.1f × H %.1f cm ±%.1f", $0.width, $0.depth, $0.height, measurements.uncertainty?.plusMinusCm ?? 0) }
             ?? "size unavailable (\(measurements.unavailableReason ?? "?"))"
+        if measurements.method == "headingDerived" {
+            return String(format: "[pack] %@: %d/%d views, %@, %d masks, %.1fs", session.sessionId, shown, choices.count, size,
+                          measurements.usableSilhouettes, timings["total"] ?? 0)
+        }
         return String(format: "[pack] %@: %d/%d views, %@, %d hull views, %.1fs", session.sessionId, shown, choices.count, size,
                       measurements.viewsUsed, timings["total"] ?? 0)
     }
@@ -239,27 +261,36 @@ public final class PackBuilder {
             }
         }
         var box: PixelRect?
+        let heading = session.usesHeadingGuidance
         if let m = mask, let b = m.boundingBox() {
             box = b
             choice.cropSource = "maskBoundingBox"
         } else if let projected = MaskCropPlanner.projectObject(photo: photo, session: session) {
+            // Heading-guided sessions: the box derived after capture (centre + approximate size); otherwise the user's cylinder.
             box = projected.boundingBox
-            choice.cropSource = "projectedCylinder"
+            choice.cropSource = heading ? "projectedDerivedBox" : "projectedCylinder"
             mask = nil
         }
         let rotation = photo.image.displayRotationDegClockwise
-        let crop = box.flatMap { CropMath.crop(around: $0, imageWidth: W, imageHeight: H) } ?? PixelBox(x: 0, y: 0, width: W, height: H)
-        if box == nil { choice.cropSource = "fullImage" }
-        let out = CropMath.outputSize(crop: crop, rotationDegClockwise: rotation)
-        let view = try ImageOps.uprightCrop(image, crop: crop, rotationDegClockwise: rotation, width: out.width, height: out.height)
+        var crop = box.flatMap { CropMath.crop(around: $0, imageWidth: W, imageHeight: H) }
+        if crop == nil && heading {
+            // Size unknown: the square around the crosshair (the photo's centre), the same region the iPhone gave Vision.
+            crop = MaskCropPlanner.crosshairPlan(imageWidth: W, imageHeight: H).region
+            choice.cropSource = "crosshairCenter"
+        } else if crop == nil {
+            choice.cropSource = "fullImage"
+        }
+        let finalCrop = crop ?? PixelBox(x: 0, y: 0, width: W, height: H)
+        let out = CropMath.outputSize(crop: finalCrop, rotationDegClockwise: rotation)
+        let view = try ImageOps.uprightCrop(image, crop: finalCrop, rotationDegClockwise: rotation, width: out.width, height: out.height)
         let name = "views/\(choice.name).jpg"
         try ImageOps.writeJPEG(view, to: dir.appendingPathComponent(name))
         choice.file = name
-        choice.cropInPhoto = crop
+        choice.cropInPhoto = finalCrop
         choice.outputWidth = out.width
         choice.outputHeight = out.height
         if writeCutouts, let m = mask, let maskImage = ImageOps.makeGrayImage(m) {
-            let alphaImage = try ImageOps.uprightCrop(maskImage, crop: crop, rotationDegClockwise: rotation,
+            let alphaImage = try ImageOps.uprightCrop(maskImage, crop: finalCrop, rotationDegClockwise: rotation,
                                                       width: out.width, height: out.height, gray: true)
             let alpha = try ImageOps.gray(alphaImage).boxBlurred()
             let cut = try ImageOps.transparentCutout(photo: view, alpha: alpha)
@@ -273,6 +304,7 @@ public final class PackBuilder {
     // MARK: Size
 
     func measure(referenceFrameId: String?, dir: URL) -> Measurements {
+        if session.usesHeadingGuidance { return measureHeading(referenceFrameId: referenceFrameId) }
         var m = Measurements(sessionId: session.sessionId, status: "unavailable")
         m.referenceFrameId = referenceFrameId
         guard let frameId = referenceFrameId, let frame = session.referenceFrame(id: frameId) else {
@@ -442,6 +474,83 @@ public final class PackBuilder {
         return m
     }
 
+    /// Heading-guided session: no cylinder and no reference point were set during capture. The centre (closest point to the
+    /// photos' centre lines), the object frame and an approximate size were derived after capture (on the iPhone, or here
+    /// when the session has none yet). No visual hull: an `ai5` session has 5 photos.
+    func measureHeading(referenceFrameId: String?) -> Measurements {
+        var m = Measurements(sessionId: session.sessionId, status: "unavailable")
+        m.method = "headingDerived"
+        m.referenceFrameId = referenceFrameId
+        guard let frameId = referenceFrameId, let frame = session.referenceFrame(id: frameId), let heading = frame.heading else {
+            m.unavailableReason = "no reference frame with confirmed photos"
+            return m
+        }
+        m.baseSource = frame.base?.source.rawValue
+        guard let derivation = heading.derivation else {
+            m.unavailableReason = "the object centre was not derived (no front photo)"
+            return m
+        }
+        m.heading = Measurements.HeadingInfo(derivation: derivation, computedBy: headingComputedHere ? PackInfo.toolName : "iPhone")
+        guard let center = derivation.centerWorld?.simd else {
+            m.unavailableReason = "the object centre could not be derived (\(derivation.reasons.map(\.rawValue).joined(separator: ", ")))"
+            return m
+        }
+        let baseKnown = derivation.origin == .base
+        let originY = frame.basePointWorld?.simd.y ?? center.y
+        m.frame["origin"] = baseKnown
+            ? "x, z: the object centre derived after capture (closest point to the photos' centre lines); y = 0: the supporting surface (table) measured by ARKit (\(frame.base?.source.rawValue ?? "?"))"
+            : "x, z: the object centre derived after capture (closest point to the photos' centre lines); y = 0: the height of that centre (the table height is unknown; it is NOT the bottom of the object)"
+        m.frame["z"] = "towards the front camera: opposite the front photo's horizontal viewing direction (views/front.jpg looks along -Z)"
+        guard let size = derivation.size else {
+            m.unavailableReason = "the approximate size was not computed (masks still pending when the session was sent)"
+            return m
+        }
+        // No hull: viewsUsed stays 0; the masks used for the size are heading.size.photoIds.
+        m.usableSilhouettes = size.photoIds.count
+        guard size.isKnown, let w = size.widthM, let d = size.depthM, let h = size.heightM else {
+            m.unavailableReason = "the approximate size is unknown (\(size.reasons.map(\.rawValue).joined(separator: ", ")))"
+            return m
+        }
+        m.status = "approximate"
+        m.sizeM = Size3(width: round6(w), depth: round6(d), height: round6(h))
+        m.sizeCm = Size3(width: round1(w * 100), depth: round1(d * 100), height: round1(h * 100))
+        if let lo = size.boxMinM?.simd, let hi = size.boxMaxM?.simd {
+            let dy = center.y - originY
+            m.bboxMinM = [round6(lo.x), round6(lo.y + dy), round6(lo.z)]
+            m.bboxMaxM = [round6(hi.x), round6(hi.y + dy), round6(hi.z)]
+        }
+        m.confidence = size.confidence
+        m.confidenceReasons = size.reasons.map(Self.headingSizeReasonText)
+        if derivation.status != .ok {
+            m.confidenceReasons.append("object centre: \(derivation.status.rawValue) (\(derivation.reasons.map(\.rawValue).joined(separator: ", ")))")
+        }
+        m.caveats = [
+            "Approximate size derived after capture from the iPhone masks' bounding boxes and the camera poses. Nothing was fitted or measured during capture (no cylinder, no reference point).",
+            "Two readings bracket the size: lowerM (an axis-aligned box fitted to every mask's bounding box: right for box-like objects, too small for rounded ones) "
+                + "and upperM (each mask's extent on the plane through the centre: close for rounded objects, too large for box-like ones). sizeM is their geometric mean.",
+            "Where lowerM and upperM differ a lot (reason shapeDependent), the dimension depends on the object's shape: look at the photos. Height is the most affected (the photos look down at about 15°).",
+            String(format: "Object centre: closest point to %d photos' centre lines; the lines miss it by %.1f cm (RMS), %.1f cm at most. Larger misses mean the object was not on the crosshair or the poses drifted.",
+                   derivation.photoIds.count, (derivation.residualRmsM ?? 0) * 100, (derivation.residualMaxM ?? 0) * 100),
+            baseKnown ? "y = 0 is the table under the object (ARKit \(frame.base?.source.rawValue ?? "?")); the size box (bboxMinM/bboxMaxM) is placed from the masks and need not touch it exactly."
+                : "The table height is unknown: y = 0 is the derived centre's height, not the bottom. The size box (bboxMinM/bboxMaxM) gives the approximate bottom (its y minimum).",
+            "No visual hull and no hull.obj (5 photos are too few for a carve).",
+        ]
+        return m
+    }
+
+    static func headingSizeReasonText(_ r: HeadingSizeReason) -> String {
+        switch r {
+        case .noCenter: return "the object centre is unknown"
+        case .notEnoughMasks: return "not enough usable masks"
+        case .maskTouchesImageEdge: return "a mask touches the photo's edge (the object may extend beyond the photo)"
+        case .poorFit: return "the box does not fit the masks well (wrong mask, object not on the crosshair, or pose drift)"
+        case .oppositeViewsDisagree: return "opposite views (front/back or right/left) disagree on the size"
+        case .centerLowConfidence: return "the object centre was derived with low confidence"
+        case .shapeDependent: return "lower and upper readings differ a lot: the size depends on the object's shape"
+        case .fitFailed: return "the box fit failed"
+        }
+    }
+
     /// Too few silhouettes for a hull: report the cylinder the user fitted during capture, clearly labelled as such.
     static func useCylinder(_ m: inout Measurements, size: ObjectSize, silhouettes: Int) {
         let d = 2 * size.radiusM, h = size.heightM
@@ -465,6 +574,17 @@ public final class PackBuilder {
     func footerLines(_ m: Measurements) -> [String] {
         let title = session.title.isEmpty ? "(untitled)" : session.title
         var lines = ["\(title) · session \(session.sessionId.prefix(8)) · tiles placed where the camera stood, seen from above (front at the bottom)"]
+        if m.method == "headingDerived" {
+            if let s = m.sizeCm {
+                lines.append(String(format: "Approximate size (derived after capture from masks, %@ confidence): W %.1f × D %.1f × H %.1f cm · X right, Y up, Z front", m.confidence ?? "?", s.width, s.depth, s.height))
+            } else {
+                lines.append("Size unavailable: \(m.unavailableReason ?? "unknown")")
+            }
+            if let h = m.heading {
+                lines.append(String(format: "Heading-guided capture: object centre from %d photos' centre lines (miss %.1f cm RMS) · table height %@", h.photoIds.count, (h.residualRmsM ?? 0) * 100, h.origin == "base" ? "measured" : "unknown"))
+            }
+            return lines
+        }
         if m.method == "userCylinder", let s = m.sizeCm {
             lines.append(String(format: "Approximate size (user-fitted capture cylinder, NOT measured): diameter %.1f cm × height %.1f cm", s.width, s.height))
             lines.append("Only \(m.usableSilhouettes) silhouettes (a hull needs \(Self.minimumHullViews)+): no visual hull; the object is usually smaller than this cylinder")
