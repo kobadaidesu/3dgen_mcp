@@ -9,16 +9,18 @@
 - **3D の生成そのものは範囲の外です。** 生成は、Claude Code・Codex などの AI エージェントが、ここで作ったデータを読んで行います。生成のアルゴリズムや特定の生成サービスへの接続は、このリポジトリに入れません。
 - 例外として、**平らな作品（貼り絵・紙に描いた絵）を写真 1 枚から GLB にするツール** `tools/flat-art-glb/` を置いています（ユーザーが決めたもの）。撮影アプリや `for_claude/` の流れとはつながっておらず、写真 1 枚と設定ファイルから単独で動きます。立体の作品の生成は、引き続き範囲の外です。
 - 今の方針（ユーザーが決めたもの）は **「AI に推論させながら作る」** です。底の中心を決めてから、正面・右・後ろ・左の 4 方向と、最後に真上から撮る **5 枚の撮影（`ai5`）** を、新しいセッションの既定にしています。数枚のよい写真から AI が形を推論する前提なので、写真どうしの重なりは要りません。
+- 新しいセッションを作るときに、撮る人が作品の種類を選びます。**立体（工作・粘土など）** は上の `ai5`、**平面（絵・貼り絵など）** は真上から 1 枚（`flat1`）です。どちらにするかは人が決め、アプリは自動で見分けません。
 - 48 方向の写真測量向けの撮影（`photogrammetry`）や Mac での写真測量のツール（`tools/reconstruct/`）は、実験のために残しています。今の主な流れではありません（下の「決めたこと・分かったこと」）。
 
 ## 構成
 
 | ディレクトリ | 中身 | 役割 |
 |---|---|---|
-| `ios/MemoriaCapture/`・`ios/MemoriaCapture.xcodeproj` | iPhone のアプリ（Swift・SwiftUI・ARKit・Vision。iOS 17 以上、外部のライブラリなし） | 撮影の案内・高解像度の写真（`ARSession.captureHighResolutionFrame()`）とカメラの情報の保存・作品マスクの作成と確かめ・確認画面・Mac への送信。`App/`・`UI/`・`AR/`・`Analysis/`・`Storage/`・`Transfer/` に分けている |
-| `ios/Packages/CaptureCore/` | SwiftPM のパッケージ（Foundation・simd・CryptoKit だけ） | アプリの「純粋なロジック」：session.json の型、撮影方向の一覧（`DirectionPlan`）、角度と投影の計算、撮影の進み具合、マスクの範囲と確かめ、転送、同じネットワークかの判定（`LocalNetworkPolicy`）。macOS の `swift test` で確かめられる。Mac のツールもこの型を使う。確認用の `capture-e2e`（合成セッションを受信サーバーへ送る）もここ |
+| `ios/MemoriaCapture/`・`ios/MemoriaCapture.xcodeproj` | iPhone のアプリ（Swift・SwiftUI・ARKit・Vision。iOS 17 以上、外部のライブラリなし） | 撮影の案内・高解像度の写真（`ARSession.captureHighResolutionFrame()`）とカメラの情報の保存・作品マスクの作成と確かめ・平面の作品の用紙の検出と遠近の補正・確認画面・Mac への送信。`App/`・`UI/`・`AR/`・`Analysis/`・`Storage/`・`Transfer/` に分けている。平面の作品の撮影は `AR/FlatCaptureController.swift`・`UI/FlatCaptureView.swift`・`Analysis/SheetDetection.swift` |
+| `ios/Packages/CaptureCore/` | SwiftPM のパッケージ（Foundation・simd・CryptoKit だけ） | アプリの「純粋なロジック」：session.json の型、撮影方向の一覧（`DirectionPlan`）、角度と投影の計算、撮影の進み具合、マスクの範囲と確かめ、平面の作品の計算（`FlatCapture.swift`：四隅の並べ方・実寸・案内・自動撮影）、転送、同じネットワークかの判定（`LocalNetworkPolicy`）。macOS の `swift test` で確かめられる。Mac のツールもこの型を使う。確認用の `capture-e2e`（合成セッションを受信サーバーへ送る）もここ |
 | `receiver/` | Python 3.9 以上（標準ライブラリだけ） | Mac の受信サーバー `memoria_receiver.py`。同じネットワークからの接続だけを受け、`captures/` に保存する。受け取るたびに `memoria-pack` を裏で動かす |
-| `tools/claude-pack/` | Swift（macOS 14 以上） | `memoria-pack`。受け取ったセッションから AI 向けの入力 `captures/for_claude/<sessionId>/` を作る |
+| `tools/claude-pack/` | Swift（macOS 14 以上） | `memoria-pack`。受け取ったセッションから AI 向けの入力 `captures/for_claude/<sessionId>/` を作る（平面の作品は、まっすぐにした絵と紙の実寸だけ） |
+| `mcp-server/` | Python（MCP の SDK は uv が入れる。中身の `memoria_core.py` は標準ライブラリだけ） | Claude Code・Codex から撮影データを読む MCP サーバー（`list_sessions`・`get_brief`・`get_view` など） |
 | `tools/reconstruct/` | Swift（Apple シリコンの Mac、macOS 14 以上） | `memoria-reconstruct`。RealityKit の `PhotogrammetrySession` で写真から USDZ を作る実験用のツール |
 | `tools/flat-art-glb/` | Python（numpy・OpenCV・mapbox_earcut）。確かめには Node.js（three・gltf-validator）と Playwright | 平らな作品の写真 1 枚から GLB を作る関数の集まりとコマンド（`flatart_glb.py`）。撮影の流れとは別に単独で動く。説明は `tools/flat-art-glb/README.md` |
 | `docs/` | 取り決め | `data-format.md`（session.json の形・座標・画像の向き・撮影方向の一覧・マスクの確かめ）、`transfer-protocol.md`（iPhone → Mac の転送の手順と、同じネットワークの中だけにする決まり） |
@@ -26,15 +28,30 @@
 
 session.json の形は [docs/data-format.md](docs/data-format.md) が正です。iPhone・受信サーバー・Mac のツールは同じ形を読み書きします。項目を足すときは、無くても読めるようにして `schemaVersion` を 1 のままにしてきました（足した項目はどれも「後から足した項目」と書いてある）。
 
-## 撮影から AI に渡るまでの流れ（`ai5`）
+## 撮影から AI に渡るまでの流れ（立体：`ai5`）
 
 1. Mac で受信サーバーを起動します。ペアリングコード（6 桁）と接続先の URL が出ます。
 2. iPhone と Mac を同じネットワーク（自宅の Wi-Fi・USB ケーブル・iPhone のインターネット共有）につなぎ、アプリの「設定」で送り先（Bonjour の一覧か、URL の手入力）とペアリングコードを入れて「接続を確認」を押します。
-3. 「新規作成」で作品名を入れます（AI が何の物かを知る手がかりになります）。
+3. 「新しく撮る」で作品名を入れ（AI が何の物かを知る手がかりになります）、作品の種類で **「立体（工作・粘土など）」**（既定）を選びます。平面の作品は下の「平面の作品の流れ」です。
 4. 底の中心に印を合わせて「ここが底の中心」を押し、円柱のガイドの高さと半径を作品に合わせ、「基準を確定」を押します。印は ARKit の平面（黄色）、机の特徴点から推定した高さ（水色）、iPhone の下端を机に当てて測った高さ（紫）の順に使います。「底の高さ ▼▲」で 0.5 cm ずつ直せます。
 5. 正面を手動で撮ります（**この方向がデータの「正面」になります**）。続けて近い方の横から右・後ろ・左（またはその逆）を仰角 15° 前後で撮り（条件がそろうと自動で撮る）、最後に真上（仰角 75° 以上、向きは問わない）を撮ります。画面には「n / 5」が出ます。
 6. 確認画面で写真と切り抜きを見て、「送信」を押します。
 7. Mac では、完了したセッションが `captures/sessions/<sessionId>/` に入り、続けて `captures/for_claude/<sessionId>/` が作られます（`tools/claude-pack` を release でビルドしてあるときだけ）。AI エージェントの入口は **`captures/for_claude/<sessionId>/brief.md`** です。
+
+## 平面の作品の流れ（`flat1`）
+
+1〜2 は立体と同じです。
+
+3. 「新しく撮る」で作品名を入れ、**「平面（絵・貼り絵など）」** を選びます。画面には見分ける手がかり（横から見るとほぼ紙だけの物）を出しますが、決めるのは撮る人です。
+4. 底の中心・円柱の設定はありません。iPhone を作品の真上に持ち、紙の全体を画面に入れます。Vision（`VNDetectRectanglesRequest`）が見つけた紙の輪郭が画面に出ます（撮れる状態なら緑）。
+5. 輪郭が止まり、iPhone の傾きが 70° 以上（ほぼ真上）、紙が画面の端にかかっていないと、0.8 秒で自動で撮ります（自動撮影はオフにもできる）。シャッターはいつでも押せます（紙が見つからない・真上でないときも撮れる。撮ったあとに知らせる）。画面には「1 / 1 撮りました」と、紙が見つからない・端にかかっている・真上でない・測った大きさが出ます。
+6. 撮った高解像度の写真で紙を見つけ直し、ARKit の平面に四隅を当てて実寸を測り（平面が無ければ大きさは null）、遠近を直した画像（`rectified/<photoId>.jpg`）を作ります。元の写真はそのまま保存します。マスクは作りません。
+7. 確認画面（1/1）で写真を見て「送信」を押します。撮り直すと一番新しい写真が代表になります。
+8. Mac の `for_claude/<sessionId>/` には `brief.md`（平面の作品で、3D の再構成は要らない、紙の実寸か「分かりません」）、`views/artwork.jpg`（まっすぐにした絵。直せなかったときは写真をまっすぐに回したもの）、補正したときは `views/photo.jpg`、`measurements.json`（`sheet`）、`pack.json`（`workKind: "flat"`）が入ります。`overview.jpg`・`hull.obj` はありません。
+
+session.json の形（`workKind`・`photos[].flat`）は [docs/data-format.md](docs/data-format.md) の「平面の作品」です。
+
+## 立体のパックの中身
 
 `ai5` のセッションの `for_claude/` には、`brief.md`、`overview.jpg`（3 × 3 の一覧）、`views/{front,right,back,left,top}.jpg`（まっすぐに回し、作品のまわりで切り出した背景付きの写真）、`measurements.json`、`pack.json` が入ります。`ai5` では visual hull を作らないので `hull.obj` はありません。中身の詳しい説明は [tools/claude-pack/README.md](tools/claude-pack/README.md) です。
 
@@ -66,6 +83,7 @@ tools/claude-pack/.build/release/memoria-pack <sessionId の先頭> --force --cu
 (cd tools/claude-pack && swift test)
 (cd tools/reconstruct && swift test)
 python3 -m unittest discover -s receiver/tests
+python3 -m unittest discover -s mcp-server/tests
 python3 -m unittest discover -s tools/flat-art-glb/tests   # numpy・OpenCV・mapbox_earcut が要る
 ```
 
@@ -94,7 +112,7 @@ xcrun devicectl device install app --device <UDID> ios/DerivedData/Build/Product
 - 初めて署名するときは、Mac で codesign がキーチェーンの鍵を使う許可を求めます（Mac のログインのパスワードを入れて「常に許可」）。コマンドからだと `errSecInternalComponent` で止まることがあり、そのときは Xcode の ▶ で一度実行します。
 - iPhone で「信頼されていないデベロッパ」と出たら、「設定 > 一般 > VPN とデバイス管理」で自分の開発元を信頼します。
 - `devicectl` で iPhone が `unavailable` のときは入れられません。ケーブルでつなぎ直し、ロックを解除します。
-- 送信の流れは、`capture-e2e` で実機なしに確かめられます。8765 で動いている受信サーバーとは別のポートと一時フォルダで受信サーバーを立てて、`(cd ios/Packages/CaptureCore && swift run capture-e2e http://127.0.0.1:<port> <ペアリングコード>)` を実行します（受信サーバーの `--host 127.0.0.1 --no-bonjour --data-dir <一時フォルダ>`。`--fail-put-every N` で再送も確かめられる）。
+- 送信の流れは、`capture-e2e` で実機なしに確かめられます。8765 で動いている受信サーバーとは別のポートと一時フォルダで受信サーバーを立てて、`(cd ios/Packages/CaptureCore && swift run capture-e2e http://127.0.0.1:<port> <ペアリングコード>)` を実行します（受信サーバーの `--host 127.0.0.1 --no-bonjour --data-dir <一時フォルダ>`。`--fail-put-every N` で再送も確かめられる）。`--flat` を付けると、平面の作品の合成セッション（真上の写真 1 枚・紙の四隅・実寸・補正した画像）を送ります。受信サーバーは受け取るたびに release の `memoria-pack` を動かすので、続けて `for_claude/` も確かめられます。
 
 ## 決めたこと・分かったこと
 
@@ -117,6 +135,9 @@ xcrun devicectl device install app --device <UDID> ios/DerivedData/Build/Product
 - 以上を受けて、ユーザーが **「AI に推論させながら作る」** 方針に切り替え、既定の撮影を `ai5` にしました。
 - 背景を消した写真（cutout）は既定では作りません。読み手は写真を見る AI で、背景付きの写真で作品を見分けられるためです。要るときだけ `memoria-pack --cutouts` で、iPhone のマスクから透明な PNG を作ります。
 - iPhone ではマスクを作り続けます（作品が写っているかの確認に使う）。ただし `ai5` で撮り直させるのは **はっきり失敗したときだけ** です（作品が見つからない・マスクの大半が作品の外など。決まりは [docs/data-format.md](docs/data-format.md) の「マスクの確かめ」）。マスクの確かめのしきい値（`MaskCheckThresholds`）は、マウスの撮影だけで決めた値です。
+- 作品の種類（立体・平面）は **撮る人が選びます**。紙に毛糸を貼った絵のような中間の作品を自動で見分ける仕組みは作らない、とユーザーが決めました。
+- 平面の作品はマスクを作りません（紙の四隅が作品の範囲の代わり）。撮り直しもマスクでは決めず、真上の写真が 1 枚あればそろったとみなします。紙が見つからない・端にかかっている・真上でない写真は「気になる写真」に出すだけで、撮る・送るのは止めません。
+- 平面の作品の大きさは、ARKit の平面に四隅を当てて **測れたときだけ** 書きます。測れなければ null で、`brief.md` も「分かりません」と書きます。影・照り返しの検出は範囲の外です。
 - `ai5` の大きさは **おおよそ** です。使えるマスクが 8 枚未満では visual hull を作らず、撮影のときに合わせた円柱の大きさを `status: "approximate"`・`confidence: "low"` で書きます。
 
 ## 守ること
@@ -142,7 +163,8 @@ xcrun devicectl device install app --device <UDID> ios/DerivedData/Build/Product
 
 ## 未対応・予定
 
-- **iPhone にはまだ `ai5` の版が入っていません。** `ai5` に変えたときは `devicectl` で iPhone が `unavailable` で、入れられませんでした。ケーブルでつなぎ、ロックを解除してから、上の「実機に入れるとき」で入れます。`ai5` の撮影の流れは、実機ではまだ試していません。
+- **iPhone にはまだ `ai5` と平面の作品の版が入っていません。** どちらも、作ったときは `devicectl` で iPhone が `unavailable` で、入れられませんでした。ケーブルでつなぎ、ロックを解除してから、上の「実機に入れるとき」で入れます。`ai5` と平面の作品の撮影の流れは、実機ではまだ試していません。
+- **平面の作品で、実機でしか確かめられないこと**：撮影画面の紙の輪郭（Vision の四角の検出と、画面の座標への変換）、自動撮影のしきい値（傾き 70° 以上・角の動き 1.5%・0.8 秒）、ARKit の平面に四隅を当てた実寸の精度（白い机・白い紙で平面が見つかるか）、`CIPerspectiveCorrection` の向き（補正した画像の上が、撮る人が画面で見ていた上になるか）。計算そのもの（四隅の並べ方・実寸・補正した画像の大きさ）は CaptureCore のテストと `capture-e2e --flat` で確かめています。
 - **作品としての正面を撮影のあとで選べるようにする。** 今はデータの「正面」が最初に撮った方向で、マウスではお尻側になりました。生成 AI のマルチビューの「前」には作品の正面が要ります。それまでは、作品の正面から撮り始めてもらいます。
 - **写真ごとのカメラの情報を、AI が使いやすい形で `for_claude/` に入れる。**
 - **低い角度の写真を足す**（真横に近い高さからの写真。上面の形や高さを見るため）。

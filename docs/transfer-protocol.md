@@ -40,7 +40,7 @@
 3. `PUT /sessions/{sessionId}/uploads/{uploadId}/files/{path}`、本文はファイルそのもの、ヘッダー `X-Content-SHA256: <hex>`
    - manifest に無い path は 409、大きさかハッシュが合わなければ 422（書いたものは捨てる）。合えば `{"status": "stored"}`、すでにあれば `{"status": "alreadyStored"}`。
 4. `POST /sessions/{sessionId}/uploads/{uploadId}/commit`
-   - 全ファイルがそろい、ハッシュが合い、`session.json` が読めて（`schema`・`schemaVersion` 1・`sessionId` が一致）、`photos[].image.file` と、`mask.status` が `candidate`・`confirmed` の `mask.file` がすべて manifest にあるときだけ完了。
+   - 全ファイルがそろい、ハッシュが合い、`session.json` が読めて（`schema`・`schemaVersion` 1・`sessionId` が一致、`workKind` があれば `object`・`flat` のどちらか）、`photos[].image.file` と、`mask.status` が `candidate`・`confirmed` の `mask.file` と、`photos[].flat.rectified.file`（`rectified/<photoId>.jpg`）がすべて manifest にあるときだけ完了。`photos[].flat` の四隅（`corners`）と実寸（`size`）は形も確かめます。
    - 完了：`{"status": "complete", "manifestHash": …, "path": "<Mac 上のフォルダ>"}`（200）。もう一度 commit しても同じ応答。
    - 足りない：409 `{"status": "incomplete", "missing": […]}`。session.json がおかしい：422 `{"status": "invalid", "errors": […]}`。
 5. `GET /sessions/{sessionId}` → `{"status": "complete", "manifestHash": …}` か 404 `{"status": "notFound"}`
@@ -48,7 +48,8 @@
 ## path と ID
 
 - sessionId は UUID（`^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$`）。
-- path は `session.json`、`photos/<UUID>.jpg`、`masks/<UUID>.png` だけ。ほかは 400。
+- path は `session.json`、`photos/<UUID>.jpg`、`masks/<UUID>.png`、`rectified/<UUID>.jpg`（平面の作品の、遠近を直した画像）だけ。ほかは 400。
+- `rectified/` は後から足した path です。これより前の受信サーバーは 400 を返すので、平面の作品を送るときは受信サーバーも新しくしてください（立体の作品は前の受信サーバーにも送れます）。
 
 ## Mac 側のフォルダ（既定は `memoria-capture/captures/`、`--data-dir` で変更）
 
@@ -57,7 +58,7 @@ captures/
   README.md                       このフォルダの読み方（受信側が書く）
   index.json                      完了したセッションの一覧（受信側が書き直す）
   sessions/<sessionId>/           完了したセッションだけ。中身は data-format.md の形
-    session.json  photos/  masks/
+    session.json  photos/  masks/  rectified/（平面の作品だけ）
     _receipt.json                 {"complete": true, "manifestHash", "receivedAt", "files": [...]}
     upright/photos/*.jpg          表示用にまっすぐに回したコピー（K は合わない。sips があるときだけ）
     upright/masks/*.png

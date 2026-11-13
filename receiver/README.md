@@ -41,7 +41,8 @@ iPhone のアプリも、送り先が公開 IP アドレス（名前なら、引
 
 - 完成したセッションは `captures/sessions/<sessionId>/` だけです。`incoming/` は転送の途中なので使いません。
 - フォルダの読み方は、受信サーバーが書く `captures/README.md` にあります。形は [docs/data-format.md](../docs/data-format.md)。
-- 一覧と中身の確認:
+- 平面の作品（session.json の `workKind` が `flat`）のセッションには、マスクの代わりに `rectified/<photoId>.jpg`（遠近を直した画像。作れたときだけ）が入ります。受信サーバーは `rectified/<UUID>.jpg` の path を受け付け、`photos[].flat` の形と `rectified.file` が manifest にあるかを確かめます。
+- 一覧と中身の確認（`list` に種類「立体・平面」の列、`show` に種類と、平面の作品なら写真ごとの用紙・実寸・補正した画像の有無が出ます）:
 
 ```sh
 python3 receiver/memoria_receiver.py list
@@ -50,7 +51,7 @@ python3 receiver/memoria_receiver.py show <sessionId の先頭>
 
 ## AI ツール向けの入力（`captures/for_claude/`）
 
-Claude Code などの AI ツールで作品の 3D モデルを作るときの入口は **`captures/for_claude/<sessionId>/brief.md`** です。向きをそろえて切り抜いた代表の写真（`views/`）、一覧の画像（`overview.jpg`）、visual hull で測った実寸（`measurements.json`）、粗い形（`hull.obj`）が入っています。作り方と中身は [tools/claude-pack/README.md](../tools/claude-pack/README.md)。
+Claude Code などの AI ツールで作品の 3D モデルを作るときの入口は **`captures/for_claude/<sessionId>/brief.md`** です。向きをそろえて切り抜いた代表の写真（`views/`）、一覧の画像（`overview.jpg`）、visual hull で測った実寸（`measurements.json`）、粗い形（`hull.obj`）が入っています。平面の作品は、まっすぐにした絵（`views/artwork.jpg`）と紙の実寸だけです。作り方と中身は [tools/claude-pack/README.md](../tools/claude-pack/README.md)。
 
 - 受信サーバーは、セッションを受け取る（commit が完了する）たびに `tools/claude-pack/.build/release/memoria-pack` があれば裏で動かします。受信の応答は待たせず、失敗しても受信には影響しません（ログに `[警告] for_claude/ を作れませんでした…` を 1 行）。成功すると `[for_claude] …` を 1 行出します。
 - ビルドしていないときは、最初の受信で一度だけ作り方を表示します：`cd tools/claude-pack && swift build -c release`。

@@ -44,6 +44,23 @@ hull.obj                 visual hull の粗い形（ボクセルの外側の面�
 pack.json                写真の選び方（向きごとの photoId・実際の方位と仰角・切り抜きの範囲）、撮れている範囲、使えない切り抜き、出どころ、時間
 ```
 
+### 平面の作品（`workKind` が `flat`）
+
+撮影アプリで「平面（絵・貼り絵など）」を選んだセッション（撮影方向 `flat1`、真上から 1 枚）は、3D 用の出力を作りません。
+
+```
+brief.md            「平面の作品です」「3D の形を推論・再構成する必要はありません（絵を板や額に貼る形で使える）」、紙の実寸か「分かりません」、注意点
+views/artwork.jpg   遠近を直してまっすぐにした絵（iPhone が作った rectified/<photoId>.jpg を長い辺 1568 px 以下にしたもの）。
+                    補正した画像が無いとき（紙が見つからなかったなど）は、元の写真をまっすぐに回しただけのもの
+views/photo.jpg     補正した画像があるときだけ：元の写真をまっすぐに回したもの（補正が正しいかを見比べる）
+measurements.json   workKind "flat"、method "flatSheetCorners"、sheet（widthM・heightM・widthCm・heightCm・planeSource・photoId。幅は絵の横、高さは縦）。
+                    測れなかったときは status "unavailable"・sheet null と理由（推測で埋めない）。sizeCm・sizeM は null
+pack.json           workKind "flat"、views（artwork・photo）、flat（使った写真・紙の四隅・紙が端にかかっているか・補正した画像の場所・カメラの傾き）
+```
+
+- `overview.jpg`（方向の一覧）・`hull.obj`・`--cutouts` の PNG は作りません。マスクは使いません。
+- 使う写真：置き換え済みでない（アプリと同じ決まり：一番新しい真上の写真が前の写真を置き換える）、真上（`targetId` あり）、補正した画像がある、紙の四隅がある、画質がよい、新しい、の順。
+
 ### 向きと写真の選び方
 
 **AI 用 5 方向（`directionPlan.id` が `ai5`）のセッション**：向きは `front`・`right`・`back`・`left`（それぞれ `a000-e15`・`a090-e15`・`a180-e15`・`a270-e15`）と `top`（`top-e90`、方位は問わない）の 5 つだけです。それぞれ、その方向として撮った写真（`direction.targetId` が同じ）を一番に選びます。`top` は仰角 60° 以上（アプリは 75° 以上で撮る）。
@@ -81,5 +98,5 @@ pack.json                写真の選び方（向きごとの photoId・実際�
 
 ```sh
 swift test   # 写真の選び方（角度・切り抜き・置き換え済み・基準・ai5 の 5 方向）、切り抜きと回転の計算と画素、透明の cutout、合成した箱の visual hull（大きさ・机の面）、
-             # 5 方向のセッションの出力（背景付きの写真だけ・円柱の目安・--cutouts）、JSON の形
+             # 5 方向のセッションの出力（背景付きの写真だけ・円柱の目安・--cutouts）、平面の作品の出力（補正した絵・実寸・大きさ不明）、JSON の形
 ```
