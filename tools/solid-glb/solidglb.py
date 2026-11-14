@@ -2,13 +2,15 @@
 """solid-glb: build a GLB of a simple solid object from a few photos and a JSON config.
 
 Templates
-  slab  a flat-topped object (box, board, tray, controller ...): outline traced on the top photo,
-        stacked layers with their own height / inset, the rectified top photo as the top texture,
-        round features (buttons, knobs, screws) and small marks on the side walls.
+  slab  stacked layers on a base: each layer has its own outline (or the shared one), height and wall profile
+        (straight, tapered or dome-like); the top photo (straight down or oblique) is mapped through a pinhole
+        camera model onto top faces and camera-facing walls; round features (buttons, knobs, screws), flat
+        cut-outs standing upright (cards, textured from their own photo) and small marks on the side walls.
+        The base is a rectangle given by 4 corners, or a round base (paper plate) given by points on its rim.
 
 Commands
   grid   PHOTO OUT.jpg [x0 y0 x1 y1] [height]   photo with a labelled grid, to read positions as fractions
-  build  CONFIG.json --out DIR                   model.glb, report.json, top_rectified.jpg, top_overlay.jpg
+  build  CONFIG.json --out DIR                   model.glb, report.json, photo_overlay.jpg, top_rectified.jpg, top_overlay.jpg
   check  DIR                                     validate, render the config's views, compare.jpg
 
 Positions in a config are fractions of the photo (x right, y down) unless a key ends with _mm.
@@ -21,6 +23,7 @@ import cv2
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
+unit = lambda v: v / np.maximum(np.linalg.norm(v, axis=-1, keepdims=True), 1e-12)
 
 
 # ------------------------------------------------------------------ photo geometry
@@ -41,30 +44,141 @@ def quad_aspect(c, w, h):
     return math.sqrt(q(n2) / q(n3)), math.sqrt(f2)
 
 
+def levenberg(fun, p, iters=200):
+    """Minimise |fun(p)|^2 (Levenberg-Marquardt, numeric Jacobian)."""
+    p = np.asarray(p, float); r = fun(p); cost = r @ r; lam = 1e-3
+    for _ in range(iters):
+        J = np.empty((len(r), len(p)))
+        for k in range(len(p)):
+            e = 1e-6 * max(1.0, abs(p[k])); dp = p.copy(); dp[k] += e; J[:, k] = (fun(dp) - r) / e
+        A, g = J.T @ J, J.T @ r
+        while True:
+            step = np.linalg.solve(A + lam * np.diag(np.diag(A) + 1e-12), -g)
+            rn = fun(p + step); cn = rn @ rn
+            if np.isfinite(cn) and cn < cost:
+                p, r, cost, lam = p + step, rn, cn, max(lam / 3, 1e-10); break
+            lam *= 4
+            if lam > 1e10: return p
+        if np.linalg.norm(step) < 1e-10 * (1 + np.linalg.norm(p)): break
+    return p
+
+
+def circle_pose(rim, front, R, f, w, h):
+    """Pose of a circle of radius R (mm) on a plane from >= 5 rim pixels; returns the square's corner pixels and a report."""
+    K = np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1.0]]); Ki = np.linalg.inv(K)
+    rays = np.c_[rim, np.ones(len(rim))] @ Ki.T
+    def unpack(p):
+        return p[2] * unit(Ki @ [p[0], p[1], 1.0]), unit(np.array([p[3], p[4], -1.0]))
+    def res(p):
+        C, n = unpack(p); d = rays @ n
+        d = np.where(np.abs(d) < 1e-9, 1e-9, d)
+        return np.linalg.norm(rays * ((n @ C) / d)[:, None] - C, axis=1) - R
+    (ex, ey), axes, ang = cv2.fitEllipse(np.asarray(rim, np.float32))
+    a = math.radians(ang); d1, d2 = np.array([math.cos(a), math.sin(a)]), np.array([-math.sin(a), math.cos(a)])
+    major, minor, mdir = (axes[0], axes[1], d2) if axes[0] >= axes[1] else (axes[1], axes[0], d1)
+    tilt = math.tan(math.acos(min(1.0, minor / max(major, 1e-9))))
+    sols = []
+    for sg in (1, -1):
+        p = levenberg(res, [ex, ey, f * R / (major / 2), sg * tilt * mdir[0], sg * tilt * mdir[1]])
+        C, n = unpack(p)
+        if n @ C > 0: n = -n
+        e = K @ (C + 10 * n); c = K @ C
+        sols.append({'rms': float(np.sqrt(np.mean(res(p) ** 2))), 'C': C, 'n': n, 'up': e[1] / e[2] < c[1] / c[2]})
+    sols.sort(key=lambda s: s['rms'])
+    best = sols[0]
+    if not best['up'] and sols[1]['up'] and not best['rms'] < 0.7 * sols[1]['rms']:
+        best = sols[1]
+    C, n = best['C'], best['n']
+    rf = Ki @ [front[0], front[1], 1.0]; F = rf * (n @ C) / (rf @ n)
+    z = F - C; z = unit(z - n * (n @ z)); x = np.cross(n, z)
+    X = np.array([C - R * x - R * z, C + R * x - R * z, C + R * x + R * z, C - R * x + R * z]) @ K.T
+    corners = X[:, :2] / X[:, 2:]
+    rep = {'rms_mm': round(best['rms'], 2), 'elevation_deg': round(math.degrees(math.asin(-n @ C / np.linalg.norm(C))), 1),
+           'distance_mm': round(float(np.linalg.norm(C)), 1), 'corners': np.round(corners / [w, h], 4).tolist()}
+    return corners, rep
+
+
 class Top:
-    """The top photo and its mapping to the object's top plane (x_mm to the right, z_mm towards the front)."""
+    """The top photo and a pinhole camera model of it. Canonical mm: x_c to the right, z_c towards the front, on the
+    reference plane (the top of the `plane` layer, y = y_ref). World: x = x_c - W/2, z = z_c - D/2."""
 
     def __init__(self, cfg, base):
         self.im = cv2.imread(str(base / cfg['photo']))
         if self.im is None:
             raise SystemExit(f"cannot read {cfg['photo']}")
-        h, w = self.im.shape[:2]
-        self.c = np.array(cfg['corners'], float) * [w, h]
-        ratio, self.focal = quad_aspect(self.c, w, h)
-        self.W = float(cfg['width_mm'])
-        self.D = float(cfg.get('depth_mm') or self.W / ratio)
-        self.depth_assumed = 'depth_mm' not in cfg
+        h, w = self.im.shape[:2]; fpx = cfg.get('focal_px')
+        self.W = float(cfg['width_mm']); self.circle_fit = None
+        if cfg.get('circle'):
+            self.focal, self.focal_source = (float(fpx), 'config') if fpx else (0.75 * max(w, h), 'assumed')
+            ci = cfg['circle']
+            if len(ci['rim']) < 5: raise SystemExit('top.circle.rim needs at least 5 points')
+            self.c, self.circle_fit = circle_pose(np.array(ci['rim'], float) * [w, h], np.array(ci['front'], float) * [w, h],
+                                                  self.W / 2, self.focal, w, h)
+            self.D, self.depth_assumed = self.W, False
+        else:
+            self.c = np.array(cfg['corners'], float) * [w, h]
+            ratio, foc = quad_aspect(self.c, w, h)
+            self.D = float(cfg.get('depth_mm') or self.W / ratio)
+            self.depth_assumed = 'depth_mm' not in cfg
+            self.focal, self.focal_source = ((float(fpx), 'config') if fpx else (foc, 'photo') if foc is not None
+                                             else (0.75 * max(w, h), 'assumed'))
         dst = np.array([[0, 0], [self.W, 0], [self.W, self.D], [0, self.D]], np.float32)
         self.H = cv2.getPerspectiveTransform(self.c.astype(np.float32), dst)
+        f = self.focal; self.K = np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1.0]])
+        M = np.linalg.inv(self.K) @ np.linalg.inv(self.H)
+        s = 2 / (np.linalg.norm(M[:, 0]) + np.linalg.norm(M[:, 1]))
+        if M[2, 2] * s < 0: s = -s
+        self.s, self.r1, self.r2, self.t = s, s * M[:, 0], s * M[:, 1], s * M[:, 2]
+        self.up = unit(np.cross(self.r2, self.r1))                    # world +Y in camera coordinates
+        self.mirrored = bool(-self.t @ self.up <= 0)
+        if self.mirrored:
+            print('warning: the corners seem to be in mirrored order (back-left, back-right, front-right, front-left '
+                  'as seen from the front); heights will be mapped the wrong way', file=sys.stderr)
+        self.q = self.H @ self.K @ self.up
+        self.cam_c = np.linalg.solve(np.c_[self.r1, self.r2, self.up], -self.t)   # camera (x_c, z_c, h)
+        self.y_ref = 0.0
+
+    def mm_at(self, frac, h):
+        """Photo points (fractions) lying at height h (mm) above the reference plane -> canonical mm."""
+        hh, ww = self.im.shape[:2]
+        p = np.c_[np.asarray(frac, float).reshape(-1, 2) * [ww, hh], np.ones(len(np.asarray(frac).reshape(-1, 2)))] @ self.H.T
+        h = np.broadcast_to(np.asarray(h, float), (len(p),)); lam = (self.s + h * self.q[2]) / p[:, 2]
+        return np.stack([(lam * p[:, 0] - h * self.q[0]) / self.s, (lam * p[:, 1] - h * self.q[1]) / self.s], 1)
 
     def mm(self, frac):
-        h, w = self.im.shape[:2]
-        p = (np.asarray(frac, float).reshape(-1, 2) * [w, h]).astype(np.float32)[None]
-        return cv2.perspectiveTransform(p, self.H)[0].astype(float)
+        return self.mm_at(frac, 0.0)
 
-    def rectified(self, ppm, margin):
-        S = np.array([[ppm, 0, margin * ppm], [0, ppm, margin * ppm], [0, 0, 1]])
-        size = (int(round((self.W + 2 * margin) * ppm)), int(round((self.D + 2 * margin) * ppm)))
+    def _canon(self, P):
+        P = np.asarray(P, float).reshape(-1, 3)
+        return P[:, 0] + self.W / 2, P[:, 2] + self.D / 2, P[:, 1] - self.y_ref
+
+    def apparent(self, P):
+        """World points (mm) -> where they appear in the rectified top photo (canonical mm)."""
+        xc, zc, h = self._canon(P)
+        a = self.s * np.stack([xc, zc, np.ones_like(xc)], 1) + h[:, None] * self.q
+        a2 = np.where(np.abs(a[:, 2]) < 1e-9, 1e-9, a[:, 2])
+        return a[:, :2] / a2[:, None]
+
+    def project(self, P):
+        """World points (mm) -> photo pixels."""
+        xc, zc, h = self._canon(P)
+        X = (xc[:, None] * self.r1 + zc[:, None] * self.r2 + self.t + h[:, None] * self.up) @ self.K.T
+        return X[:, :2] / np.where(np.abs(X[:, 2:]) < 1e-9, 1e-9, X[:, 2:])
+
+    def camera_world(self):
+        x, z, h = self.cam_c
+        return np.array([x - self.W / 2, self.y_ref + h, z - self.D / 2])
+
+    def camera_report(self):
+        x, z, h = self.cam_c
+        return {'elevation_deg': round(math.degrees(math.atan2(h, math.hypot(x - self.W / 2, z - self.D / 2))), 1),
+                'distance_mm': round(float(np.linalg.norm([x - self.W / 2, z - self.D / 2, h])), 1),
+                'position_mm': np.round(self.camera_world(), 1).tolist()}
+
+    def rectified(self, ppm, bounds):
+        x0, z0, x1, z1 = bounds
+        S = np.array([[ppm, 0, -x0 * ppm], [0, ppm, -z0 * ppm], [0, 0, 1]])
+        size = (int(round((x1 - x0) * ppm)), int(round((z1 - z0) * ppm)))
         return cv2.warpPerspective(self.im, S @ self.H, size, flags=cv2.INTER_AREA, borderMode=cv2.BORDER_REPLICATE)
 
 
@@ -86,9 +200,12 @@ def mask_poly(m, lo, eps=0.12):
     return ccw(p)
 
 
+def area2(p):
+    return np.sum(p[:, 0] * np.roll(p[:, 1], -1) - np.roll(p[:, 0], -1) * p[:, 1])
+
+
 def ccw(p):
-    a = np.sum(p[:, 0] * np.roll(p[:, 1], -1) - np.roll(p[:, 0], -1) * p[:, 1])
-    return p if a > 0 else p[::-1].copy()
+    return p if area2(p) > 0 else p[::-1].copy()
 
 
 def disk(r_mm):
@@ -98,14 +215,44 @@ def disk(r_mm):
 
 def shape_outline(poly, round_mm=0.0, inset_mm=0.0):
     """Round the corners of a polygon and/or move it inwards (negative inset = outwards)."""
-    m, lo = poly_mask(np.asarray(poly, float))
+    m, lo = poly_mask(np.asarray(poly, float), pad=20.0 + max(0.0, -inset_mm))
     if round_mm > 0:
         m = cv2.morphologyEx(cv2.morphologyEx(m, cv2.MORPH_OPEN, disk(round_mm)), cv2.MORPH_CLOSE, disk(round_mm))
-    if inset_mm > 0:
+    if abs(inset_mm) > 10:                                  # large offsets: distance transform (a big kernel is slow)
+        inside = inset_mm > 0
+        dt = cv2.distanceTransform(m if inside else 1 - m, cv2.DIST_L2, cv2.DIST_MASK_PRECISE) / RPPM
+        m = ((dt > inset_mm) if inside else (m > 0) | (dt <= -inset_mm)).astype(np.uint8)
+    elif inset_mm > 0:
         m = cv2.erode(m, disk(inset_mm))
     elif inset_mm < 0:
         m = cv2.dilate(m, disk(-inset_mm))
     return mask_poly(m, lo)
+
+
+def offset_rings(poly, offsets, step=3.0):
+    """Resample a polygon (~every `step` mm, keeping its corners) and move the same points along smoothed outward
+    normals by each offset (mm, + = outwards). Returns one ring per offset; the rings correspond point by point.
+    The normals are smoothed over ~0.8 x the largest offset along the outline, and each moved point is then put on
+    the exact offset outline (nearest point), so the rings keep their distance and do not fold at convex corners."""
+    p = ccw(np.asarray(poly, float)); pts = []
+    for a, b in zip(p, np.roll(p, -1, 0)):
+        k = max(1, int(np.ceil(np.linalg.norm(b - a) / step)))
+        pts.append(a + (b - a) * (np.arange(k) / k)[:, None])
+    pts = np.concatenate(pts)
+    e = np.roll(pts, -1, 0) - pts; en = unit(np.stack([e[:, 1], -e[:, 0]], 1))
+    nv = unit(en + np.roll(en, 1, 0))
+    gap = np.linalg.norm(e, axis=1).mean(); sigma = min(0.8 * max(abs(d) for d in offsets), len(pts) * gap / 6)
+    for _ in range(max(3, int(2 * (sigma / gap) ** 2))):       # [1,2,1]/4 passes: variance 0.5 sample^2 each
+        nv = unit(np.roll(nv, 1, 0) + 2 * nv + np.roll(nv, -1, 0))
+    return [pts if abs(d) < 1e-9 else nearest_on(pts + nv * d, shape_outline(p, inset_mm=-d)) for d in offsets]
+
+
+def nearest_on(x, poly):
+    """Nearest points on a closed polygon."""
+    a = poly[None]; ab = np.roll(poly, -1, 0)[None] - a
+    t = np.clip(np.sum((x[:, None] - a) * ab, -1) / np.maximum(np.sum(ab * ab, -1), 1e-12), 0, 1)
+    c = a + t[..., None] * ab; k = np.argmin(np.sum((c - x[:, None]) ** 2, -1), 1)
+    return c[np.arange(len(x)), k]
 
 
 def triangulate(poly):
@@ -122,12 +269,16 @@ def face_up(pos, tri, want):
     return tri
 
 
-def prism(poly, y0, y1, uv_of=None):
-    """Extrude a polygon given in (x, z). Returns {'top','bottom','side'}: (pos, nrm, tri, uv or None)."""
+def prism(poly, y0, y1, uv_of=None, top_poly=None):
+    """Extrude a polygon given in (x, z). Returns {'top','bottom','side'}: (pos, nrm, tri, uv or None).
+    uv_of maps 3D positions to UVs (top face only). With top_poly (same point count, corresponding points)
+    the walls slope from poly at y0 to top_poly at y1."""
+    if top_poly is not None:
+        return loft([poly, top_poly], [y0, y1], uv_of)
     poly = ccw(np.asarray(poly, float)); n = len(poly); tri = triangulate(poly)
     cap = lambda y: np.c_[poly[:, 0], np.full(n, y), poly[:, 1]]
     top, bot = cap(y1), cap(y0)
-    out = {'top': (top, np.tile([0, 1.0, 0], (n, 1)), face_up(top, tri, (0, 1, 0)), uv_of(poly) if uv_of else None),
+    out = {'top': (top, np.tile([0, 1.0, 0], (n, 1)), face_up(top, tri, (0, 1, 0)), uv_of(top) if uv_of else None),
            'bottom': (bot, np.tile([0, -1.0, 0], (n, 1)), face_up(bot, tri, (0, -1, 0)), None)}
     q = np.roll(poly, -1, 0); e = q - poly
     en = np.stack([e[:, 1], -e[:, 0]], 1); en /= np.maximum(np.linalg.norm(en, axis=1, keepdims=True), 1e-9)
@@ -140,6 +291,39 @@ def prism(poly, y0, y1, uv_of=None):
     nrm = np.concatenate([n3(ns), n3(ne), n3(ne), n3(ns)])
     i = np.arange(n, dtype=np.uint32)
     st = np.concatenate([np.stack([i, i + n, i + 2 * n], 1), np.stack([i, i + 2 * n, i + 3 * n], 1)])
+    out['side'] = (pos, nrm, fix_winding(pos, nrm, st), None)
+    return out
+
+
+def loft(rings, ys, uv_of=None):
+    """Walls through corresponding rings (each (n, 2) in (x, z)) at increasing heights ys; caps from the first and last ring.
+    Wall normals are the real face normals, smoothed with neighbours (along the outline and across rings) within ~45 deg."""
+    Rg = np.asarray(rings, float)
+    if area2(Rg[0]) < 0: Rg = Rg[:, ::-1].copy()
+    K, n = Rg.shape[:2]; B = K - 1
+    P = np.stack([np.c_[Rg[k][:, 0], np.full(n, float(ys[k])), Rg[k][:, 1]] for k in range(K)])
+    top, bot = P[-1], P[0]
+    out = {'top': (top, np.tile([0, 1.0, 0], (n, 1)), face_up(top, triangulate(Rg[-1]), (0, 1, 0)), uv_of(top) if uv_of else None),
+           'bottom': (bot, np.tile([0, -1.0, 0], (n, 1)), face_up(bot, triangulate(Rg[0]), (0, -1, 0)), None)}
+    Q = np.roll(P, -1, 1)
+    fn = np.cross((P[1:] + Q[1:] - P[:-1] - Q[:-1]) / 2, Q[:-1] - P[:-1])            # (B, n, 3), outwards
+    bad = np.linalg.norm(fn, axis=-1) < 1e-9
+    for _ in range(n):                                              # collapsed faces (several points on one corner): borrow a neighbour's normal
+        if not bad.any(): break
+        nb = np.roll(fn, 1, 1) + np.roll(fn, -1, 1); fn[bad] = nb[bad]; bad = np.linalg.norm(fn, axis=-1) < 1e-9
+    fn = unit(fn); fp = np.zeros((B + 2, n, 3)); fp[1:-1] = fn
+    bi, ii = np.arange(B)[:, None], np.arange(n)[None, :]
+    pos, nrm = [], []
+    for dr, dj in ((0, 0), (0, 1), (1, 1), (1, 0)):                 # quad corners, in the order of prism()
+        s = np.zeros((B, n, 3))
+        for db in (-1, 0):
+            for de in (-1, 0):
+                c = fp[bi + dr + db + 1, (ii + dj + de) % n]
+                s += c * (np.sum(c * fn, -1) > 0.7)[..., None]
+        pos.append(P[bi + dr, (ii + dj) % n].reshape(-1, 3)); nrm.append(unit(s).reshape(-1, 3))
+    pos, nrm = np.concatenate(pos), np.concatenate(nrm)
+    i = np.arange(B * n, dtype=np.uint32); m = B * n
+    st = np.concatenate([np.stack([i, i + m, i + 2 * m], 1), np.stack([i, i + 2 * m, i + 3 * m], 1)])
     out['side'] = (pos, nrm, fix_winding(pos, nrm, st), None)
     return out
 
@@ -164,7 +348,7 @@ def lathe(cx, cz, y0, profile, seg=40, uv_of=None):
     tri = np.concatenate([np.stack([a * seg + b, (a + 1) * seg + b, (a + 1) * seg + b2], 1),
                           np.stack([a * seg + b, (a + 1) * seg + b2, a * seg + b2], 1)])
     pos, nrm = pos.reshape(-1, 3), nrm.reshape(-1, 3)
-    return pos, nrm, fix_winding(pos, nrm, tri), (uv_of(pos[:, [0, 2]]) if uv_of else None)
+    return pos, nrm, fix_winding(pos, nrm, tri), (uv_of(pos) if uv_of else None)
 
 
 def merge(parts):
@@ -173,6 +357,18 @@ def merge(parts):
         pos.append(p); nrm.append(n); tri.append(t + off); uv.append(u); off += len(p)
     has_uv = all(u is not None for u in uv)
     return np.concatenate(pos), np.concatenate(nrm), np.concatenate(tri), (np.concatenate(uv) if has_uv else None)
+
+
+def subset(part, sel):
+    """The triangles of a part where sel is true, with only the vertices they use."""
+    pos, nrm, tri, uv = part; used, inv = np.unique(tri[sel], return_inverse=True)
+    return pos[used], nrm[used], inv.reshape(-1, 3).astype(np.uint32), (uv[used] if uv is not None else None)
+
+
+def facing(part, eye, thr=0.35):
+    """Triangles whose outward normal points towards eye (unit normal . unit direction > thr)."""
+    pos, _, tri, _ = part; a, b, c = pos[tri[:, 0]], pos[tri[:, 1]], pos[tri[:, 2]]
+    return np.sum(unit(np.cross(b - a, c - a)) * unit(eye - (a + b + c) / 3), 1) > thr
 
 
 # ------------------------------------------------------------------ GLB
@@ -244,17 +440,20 @@ FEATURE_PROFILES = {   # (radius factor, height factor) from the outer base up t
     'dome': [(1.0, 0), (0.98, 0.3), (0.9, 0.62), (0.7, 0.88), (0.4, 0.98), (0, 1.0)],
     'disc': [(1.0, 0), (1.0, 0.85), (0.9, 1.0), (0, 1.0)],
 }
+CARD_RIGHT = {'front': (0, 1), 'back': (0, -1), 'right': (1, 0), 'left': (-1, 0)}
+LAYER_COLOR = (0.85, 0.85, 0.85)
 
 
-def snap_circles(rect, ppm, margin, feats, tol_mm):
-    """Move each round feature onto the nearest circle found in the rectified top photo (same size class)."""
+def snap_circles(rect, ppm, origin, feats, tol_mm):
+    """Move each round feature onto the nearest circle found in the rectified top photo (same size class).
+    origin = canonical mm of the rectified image's top-left pixel."""
     g = cv2.medianBlur(cv2.cvtColor(rect, cv2.COLOR_BGR2GRAY), 5); moved = 0
     for f in feats:
         r = f['diameter_mm'] / 2
         cs = cv2.HoughCircles(g, cv2.HOUGH_GRADIENT, dp=1.5, minDist=r * ppm, param1=90, param2=28,
                               minRadius=int(r * 0.7 * ppm), maxRadius=int(r * 1.25 * ppm))
         if cs is None: continue
-        c = cs[0][:, :2] / ppm - margin
+        c = cs[0][:, :2] / ppm + origin
         d = np.linalg.norm(c - f['xz'], axis=1); k = int(np.argmin(d))
         if d[k] <= tol_mm:
             f['snap_mm'] = round(float(d[k]), 2); f['xz'] = c[k].astype(float); moved += 1
@@ -263,46 +462,119 @@ def snap_circles(rect, ppm, margin, feats, tol_mm):
     return moved
 
 
-def build_slab(cfg, base, out):
-    top = Top(cfg['top'], base); W, D = top.W, top.D
-    ppm = float(cfg.get('texture_px_per_mm', 6)); margin = 4.0
-    rect = top.rectified(ppm, margin)
-    raw = top.mm(cfg['outline'])
-    outline = shape_outline(raw, round_mm=float(cfg.get('outline_round_mm', 0)))
-    world = lambda p: np.stack([p[:, 0] - W / 2, p[:, 1] - D / 2], 1)       # canonical mm -> (x, z)
-    uv_of = lambda xz: np.stack([(xz[:, 0] + W / 2 + margin) * ppm / rect.shape[1], (xz[:, 1] + D / 2 + margin) * ppm / rect.shape[0]], 1)
+def layer_walls(L, h):
+    """Wall profile of a layer as [(height above the bottom, inset from the bottom outline)], or None for straight walls."""
+    if L.get('profile'):
+        pr = [(float(a), float(b)) for a, b in L['profile']]
+        if pr[0] != (0.0, 0.0) or any(b[0] <= a[0] for a, b in zip(pr, pr[1:])):
+            raise SystemExit(f"layer {L['name']}: profile must start with [0, 0] and have increasing heights")
+        if h is not None and abs(h - pr[-1][0]) > 1e-6:
+            raise SystemExit(f"layer {L['name']}: height_mm {h} differs from the profile's last height {pr[-1][0]}")
+        return pr
+    if float(L.get('taper_mm', 0)):
+        return [(0.0, 0.0), (h, float(L['taper_mm']))]
+    return None
 
-    glb = Glb(); tex = glb.texture(rect); m_top = glb.material('top_photo', roughness=float(cfg.get('top_roughness', 0.35)), texture=tex)
-    y = 0.0; layers = []
+
+def silhouette(top, parts, shape, origin, ppm):
+    """Mask (rectified-image pixels) of where the parts appear in the top photo."""
+    m = np.zeros(shape[:2], np.uint8)
+    for pos, _, tri, _ in parts:
+        px = np.clip(np.round((top.apparent(pos) - origin) * ppm * 16), -1e7, 1e7).astype(np.int32)
+        for t in tri:
+            cv2.fillConvexPoly(m, px[t], 255, cv2.LINE_8, 4)
+    return m
+
+
+def build_slab(cfg, base, out):
+    tcfg = cfg['top']; top = Top(tcfg, base); W, D = top.W, top.D
+    ppm = float(cfg.get('texture_px_per_mm', 6)); margin = 4.0; rough = float(cfg.get('top_roughness', 0.35))
+    names = [L['name'] for L in cfg['layers']]
+
+    def li(name, what):
+        if name not in names: raise SystemExit(f'{what}: no layer named {name!r}')
+        return names.index(name)
+
+    spans, walls, y = [], [], 0.0                                          # heights first: outlines are mapped at them
+    for L in cfg['layers']:
+        h = float(L['height_mm']) if L.get('height_mm') is not None else None
+        wl = layer_walls(L, h)
+        h = wl[-1][0] if h is None and wl else h
+        if h is None: raise SystemExit(f"layer {L['name']}: needs height_mm or profile")
+        y0 = float(L['base_mm']) if L.get('base_mm') is not None else y
+        spans.append((y0, y0 + h)); walls.append(wl); y = y0 + h
+    plane = tcfg.get('plane', names[-1]); top.y_ref = spans[li(plane, 'top.plane')][1]
+    world = lambda p: np.stack([p[:, 0] - W / 2, p[:, 1] - D / 2], 1)       # canonical mm -> (x, z)
+    outline = (shape_outline(top.mm(cfg['outline']), round_mm=float(cfg.get('outline_round_mm', 0)))
+               if cfg.get('outline') else None)
+    eye = top.camera_world()
+
+    erase = [top.mm(p) for p in tcfg.get('erase', [])]
+    def rectify(b):
+        r = top.rectified(ppm, b)
+        if erase:
+            mk = np.zeros(r.shape[:2], np.uint8)
+            for p in erase:
+                cv2.fillPoly(mk, [np.round((p - b[:2]) * ppm).astype(np.int32)], 255)
+            r = cv2.inpaint(r, mk, max(3, int(round(2 * ppm))), cv2.INPAINT_TELEA)
+        return r
+    b0 = (-margin, -margin, W + margin, D + margin)
+    rect0 = rectify(b0)
+
+    glb = Glb(); meshes, layers, rings = [], [], []    # mesh prims: (key, part); key ('L', i) layer photo, ('P',) plain photo, ('M', material)
     for i, L in enumerate(cfg['layers']):                                  # bottom to top
-        poly = world(shape_outline(outline, inset_mm=float(L.get('inset_mm', 0))))
-        h = float(L['height_mm']); pr = prism(poly, y, y + h, uv_of)
-        m = mat_of(glb, L['name'], L.get('material'), {'color': (0.85, 0.85, 0.85)})
-        textured = L.get('texture') == 'top'
-        prims = [(m_top, pr['top'])] if textured else [(m, pr['top'][:3] + (None,))]
-        prims.append((m, merge([pr['side'], pr['bottom']])))
-        glb.mesh(L['name'], prims); layers.append({'name': L['name'], 'y0_mm': y, 'y1_mm': y + h, 'points': len(poly)}); y += h
-    top_y = y
+        y0, y1 = spans[i]; at = L.get('outline_at', 'top'); wl = walls[i]
+        if L.get('outline'):
+            o = shape_outline(top.mm_at(L['outline'], (y1 if at == 'top' else y0) - top.y_ref),
+                              round_mm=float(L.get('outline_round_mm', 0)))
+        elif outline is not None:
+            o = outline
+        else:
+            raise SystemExit(f"layer {L['name']}: no outline (give the layer an outline or a shared one)")
+        poly = world(shape_outline(o, inset_mm=float(L.get('inset_mm', 0))))
+        if wl:
+            last = wl[-1][1]
+            rg = offset_rings(poly, [(last - b if at == 'top' else -b) for _, b in wl])
+            ys = [y0 + a for a, _ in wl]; pr = loft(rg, ys)
+        else:
+            pr = prism(poly, y0, y1); rg, ys = [poly, poly], [y0, y1]
+        mcfg = {'color': LAYER_COLOR, **(L.get('material') or {})}
+        m = mat_of(glb, L['name'], L.get('material'), {'color': LAYER_COLOR})
+        prims = [(('L', i), pr['top'])] if L.get('texture') == 'top' else [(('M', m), pr['top'][:3] + (None,))]
+        if L.get('side_texture') == 'top':
+            sel = facing(pr['side'], eye)
+            if sel.any(): prims.append((('L', i), subset(pr['side'], sel)))
+            prims.append((('M', m), merge(([subset(pr['side'], ~sel)] if (~sel).any() else []) + [pr['bottom']])))
+        else:
+            prims.append((('M', m), merge([pr['side'], pr['bottom']])))
+        meshes.append({'name': L['name'], 'kind': 'layer', 'i': i, 'prims': prims, 'color': mcfg['color']})
+        rings.append((rg, ys))
+        layers.append({'name': L['name'], 'y0_mm': y0, 'y1_mm': y1, 'points': len(poly), 'ring_points': len(rg[0]),
+                       'rings': len(rg), 'taper_mm': round(float(wl[-1][1]), 2) if wl else 0.0,
+                       'outline': 'own' if L.get('outline') else 'shared'})
+    top_y = max(s[1] for s in spans)
 
     feats = []
     for grp in cfg.get('features', []):
+        on = grp.get('on', names[-1]); yo = spans[li(on, f"feature {grp['name']}")][1]; hh = yo - top.y_ref
+        snap = grp.get('snap', True) and abs(hh) < 1e-6
         for at in grp['at']:
-            feats.append({'group': grp['name'], 'xz': top.mm([at])[0], 'diameter_mm': float(grp['diameter_mm'])})
-    snapped = snap_circles(rect, ppm, margin, [f for f in feats if cfg_group(cfg, f['group']).get('snap', True)],
-                           float(cfg.get('snap_tolerance_mm', 4))) if feats else 0
+            feats.append({'group': grp['name'], 'xz': top.mm_at([at], hh)[0], 'diameter_mm': float(grp['diameter_mm']), 'y': yo, 'snap': snap})
+    snapping = [f for f in feats if f['snap']]
+    snapped = snap_circles(rect0, ppm, np.array(b0[:2]), snapping, float(cfg.get('snap_tolerance_mm', 4))) if snapping else 0
     for grp in cfg.get('features', []):
         prof = FEATURE_PROFILES[grp.get('shape', 'button')]; r, h = grp['diameter_mm'] / 2, float(grp['height_mm'])
-        textured = grp.get('texture') == 'top'
-        parts = [lathe(*(world(f['xz'][None])[0]), top_y, [(a * r, b * h) for a, b in prof], uv_of=uv_of if textured else None)
+        parts = [lathe(*(world(f['xz'][None])[0]), f['y'], [(a * r, b * h) for a, b in prof])
                  for f in feats if f['group'] == grp['name']]
         if parts:
-            m = m_top if textured else mat_of(glb, grp['name'], grp.get('material'), {'color': (0.8, 0.8, 0.8)})
-            glb.mesh(grp['name'], [(m, merge(parts))])
+            key = ('P',) if grp.get('texture') == 'top' else ('M', mat_of(glb, grp['name'], grp.get('material'), {'color': (0.8, 0.8, 0.8)}))
+            meshes.append({'name': grp['name'], 'kind': 'feature', 'prims': [(key, merge(parts))]})
 
-    body = {L['name']: L for L in layers}
     for mk in cfg.get('side_marks', []):                                   # dark rectangles on a side wall of one layer
-        L = body[mk['layer']]; poly = world(shape_outline(outline, inset_mm=float(cfg_layer(cfg, mk['layer']).get('inset_mm', 0))))
-        w_, h_ = mk['size_mm']; yc = L['y0_mm'] + mk.get('height_frac', 0.5) * (L['y1_mm'] - L['y0_mm'])
+        k = li(mk['layer'], 'side mark'); (y0, y1), (rg, ys) = spans[k], rings[k]
+        w_, h_ = mk['size_mm']; yc = y0 + mk.get('height_frac', 0.5) * (y1 - y0)
+        j = int(np.clip(np.searchsorted(ys, yc) - 1, 0, len(ys) - 2)); f_ = (yc - ys[j]) / max(ys[j + 1] - ys[j], 1e-9)
+        poly = rg[j] + (rg[j + 1] - rg[j]) * f_                    # the wall at this height
         axis, sign = {'front': (1, 1), 'back': (1, -1), 'right': (0, 1), 'left': (0, -1)}[mk['side']]
         other = 1 - axis; c = (mk.get('along_frac', 0.5) - 0.5) * (W if other == 0 else D)
         a_, b_ = poly, np.roll(poly, -1, 0)                         # where the wall is, at this position along the side
@@ -314,22 +586,117 @@ def build_slab(cfg, base, out):
         q[:, 0 if other == 0 else 2] = [c - w_ / 2, c + w_ / 2, c + w_ / 2, c - w_ / 2]; q[:, 0 if axis == 0 else 2] = edge
         nv = np.zeros(3); nv[0 if axis == 0 else 2] = sign
         m = mat_of(glb, mk.get('name', 'mark'), mk.get('material'), {'color': (0.05, 0.05, 0.05), 'roughness': 0.5})
-        glb.mesh(mk.get('name', 'mark'), [(m, (q, np.tile(nv, (4, 1)), face_up(q, np.array([[0, 1, 2], [0, 2, 3]], np.uint32), nv), None))])
+        meshes.append({'name': mk.get('name', 'mark'), 'kind': 'mark',
+                       'prims': [(('M', m), (q, np.tile(nv, (4, 1)), face_up(q, np.array([[0, 1, 2], [0, 2, 3]], np.uint32), nv), None))]})
 
+    cards = []
+    for C in cfg.get('cards', []):                                         # flat cut-outs standing upright
+        im = cv2.imread(str(base / C['photo']))
+        if im is None: raise SystemExit(f"cannot read {C['photo']}")
+        hp, wp = im.shape[:2]; ol = np.array(C['outline'], float) * [wp, hp]; lo, hi = ol.min(0), ol.max(0)
+        scale = float(C['height_mm']) / (hi[1] - lo[1]) if C.get('height_mm') else float(C['width_mm']) / (hi[0] - lo[0])
+        foot = np.array(C['foot'], float) * [wp, hp] if C.get('foot') else np.array([(lo[0] + hi[0]) / 2, hi[1]])
+        on = C.get('on', plane); yo = spans[li(on, f"card {C['name']}")][1]
+        xz = world(top.mm_at([C['at']], yo - top.y_ref))[0]; F = np.array([xz[0], yo + float(C.get('lift_mm', 0)), xz[1]])
+        rx, rz = CARD_RIGHT[C.get('photo_right', 'right')]
+        U, V, N = np.array([rx, 0.0, rz]), np.array([0, -1.0, 0]), np.array([-rz, 0.0, rx])
+        Rm = np.stack([U, N, V], 1)                                     # local (a, e, b) -> world
+        t = float(C.get('thickness_mm', 0.5)); pr = prism((ol - foot) * scale, -t / 2, t / 2)
+        tw = lambda p: (p[0] @ Rm.T + F, p[1] @ Rm.T, p[2], p[3])
+        edge = mat_of(glb, C['name'], C.get('material'), {'color': (0.9, 0.9, 0.88), 'roughness': 0.8})
+        faces = [pr['top'], pr['bottom']]
+        if C.get('texture', True):
+            pad = 0.02 * (hi - lo); c0 = np.maximum(np.floor(lo - pad), 0).astype(int); c1 = np.minimum(np.ceil(hi + pad), [wp, hp]).astype(int)
+            crop = im[c0[1]:c1[1], c0[0]:c1[0]]; k = min(1.0, 1024 / max(crop.shape[:2]))
+            crop = cv2.resize(crop, (max(1, round(crop.shape[1] * k)), max(1, round(crop.shape[0] * k))), interpolation=cv2.INTER_AREA)
+            uv = lambda p: ((foot + p[:, [0, 2]] / scale - c0) / (c1 - c0))
+            faces = [f[:3] + (uv(f[0]),) for f in faces]
+            fm = glb.material(C['name'] + '_photo', roughness=float((C.get('material') or {}).get('roughness', 0.8)), texture=glb.texture(crop))
+        else:
+            fm = edge
+        meshes.append({'name': C['name'], 'kind': 'card', 'prims': [(('M', fm), tw(merge(faces))), (('M', edge), tw(pr['side']))]})
+        a = (ol[:, 0] - foot[0]) * scale
+        cards.append({'name': C['name'], 'size_mm': [round(float((hi - lo)[0] * scale), 1), round(float((hi - lo)[1] * scale), 1)],
+                      'thickness_mm': t, 'foot_mm': np.round(F, 1).tolist(), 'normal': N.tolist(),
+                      'foot_line': [F + a.min() * U, F + a.max() * U]})
+
+    # texture: cover the apparent positions of everything textured from the top photo
+    tex = [p[0] for mm in meshes for k, p in mm['prims'] if k[0] in 'LP']
+    b = b0
+    if tex:
+        A = top.apparent(np.concatenate(tex)); A = A[np.isfinite(A).all(1)]
+        b = (max(min(-margin, A[:, 0].min() - margin), -W), max(min(-margin, A[:, 1].min() - margin), -D),
+             min(max(W + margin, A[:, 0].max() + margin), 2 * W), min(max(D + margin, A[:, 1].max() + margin), 2 * D))
+    rect = rect0 if b == b0 else rectify(b); org = np.array(b[:2])
+    uv_of = lambda P: (top.apparent(P) - org) * ppm / [rect.shape[1], rect.shape[0]]
+    plain, lmat = [], {}
+    def plain_mat():
+        if not plain: plain.append(glb.material('top_photo', roughness=rough, texture=glb.texture(rect)))
+        return plain[0]
+    for mm in meshes:                                 # hidden areas: what is in front gets the layer's own colour
+        if mm['kind'] != 'layer' or not any(k[0] == 'L' for k, _ in mm['prims']): continue
+        i = mm['i']
+        occ = [p for o in meshes if (o['kind'] == 'layer' and o['i'] > i) or o['kind'] in ('feature', 'card') for _, p in o['prims']]
+        mask = silhouette(top, occ, rect.shape, org, ppm) if occ else None
+        if mask is not None and mask.any():
+            k = max(1, int(round(float(cfg.get('hidden_margin_mm', 1)) * ppm)))     # the real object is often a bit bigger than the model
+            mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * k + 1,) * 2))
+            img = rect.copy(); img[mask > 0] = np.clip(np.round(np.array(mm['color'][:3], float)[::-1] * 255), 0, 255).astype(np.uint8)
+            lmat[i] = glb.material(mm['name'] + '_photo', roughness=rough, texture=glb.texture(img))
+            layers[i]['own_texture'] = True; layers[i]['hidden_fraction'] = round(float((mask > 0).mean()), 3)
+        else:
+            lmat[i] = plain_mat(); layers[i]['own_texture'] = False
+    for mm in meshes:
+        prims = []
+        for k, p in mm['prims']:
+            if k[0] == 'L': prims.append((lmat[k[1]], p[:3] + (uv_of(p[0]),)))
+            elif k[0] == 'P': prims.append((plain_mat(), p[:3] + (uv_of(p[0]),)))
+            else: prims.append((k[1], p))
+        glb.mesh(mm['name'], prims)
+
+    allp = np.concatenate([p[0] for mm in meshes for _, p in mm['prims']])
     size = glb.save(out / 'model.glb', {'units': 'metres', 'up': '+Y', 'front': '+Z', 'template': 'slab', 'size_mm': [round(W, 1), round(top_y, 1), round(D, 1)]})
+
     cv2.imwrite(str(out / 'top_rectified.jpg'), rect)
-    ov = rect.copy(); px = lambda p: np.round((p + margin) * ppm).astype(np.int32)
-    cv2.polylines(ov, [px(outline)], True, (0, 255, 0), 2)
+    ov = rect.copy(); px = lambda p: np.round((p - org) * ppm).astype(np.int32)
+    if outline is not None:
+        cv2.polylines(ov, [px(outline)], True, (0, 255, 0), 2)
+    for rg, ys in rings:
+        cv2.polylines(ov, [px(top.apparent(np.c_[rg[-1][:, 0], np.full(len(rg[-1]), ys[-1]), rg[-1][:, 1]]))], True, (255, 255, 0), 1)
     for f in feats:
-        cv2.circle(ov, tuple(px(f['xz'][None])[0]), int(f['diameter_mm'] / 2 * ppm), (0, 0, 255), 2)
+        c3 = np.array([[f['xz'][0] - W / 2, f['y'], f['xz'][1] - D / 2]])
+        cv2.circle(ov, tuple(px(top.apparent(c3))[0]), int(f['diameter_mm'] / 2 * ppm), (0, 0, 255), 2)
     cv2.imwrite(str(out / 'top_overlay.jpg'), ov)
-    return {'template': 'slab', 'size_mm': {'width': round(W, 1), 'depth': round(D, 1), 'height': round(top_y, 1)},
-            'depth_from_photo': top.depth_assumed, 'focal_px': top.focal and round(top.focal), 'outline_points': len(outline), 'layers': layers,
-            'features': {g['name']: sum(f['group'] == g['name'] for f in feats) for g in cfg.get('features', [])},
-            'features_snapped': snapped, 'features_not_snapped': [f['group'] for f in feats if 'snap_mm' not in f and cfg_group(cfg, f['group']).get('snap', True)],
-            'feature_list': [{'group': f['group'], 'x_mm': round(float(f['xz'][0]), 2), 'z_mm': round(float(f['xz'][1]), 2),
-                              'moved_mm': f.get('snap_mm'), 'nearest_circle_mm': f.get('nearest_circle_mm')} for f in feats],
-            'triangles': glb.tris, 'bytes': size}
+
+    k = min(1.0, 1400 / top.im.shape[0]); po = cv2.resize(top.im, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    pp = lambda P: np.round(top.project(P) * k).astype(np.int32)
+    cv2.polylines(po, [np.round(top.c * k).astype(np.int32)], True, (0, 255, 255), 2, cv2.LINE_AA)
+    for rg, ys in rings:
+        for j, (r_, y_) in enumerate(zip(rg, ys)):                  # bottom ring thin, top ring thick, others thin and dark
+            last = j == len(rg) - 1
+            cv2.polylines(po, [pp(np.c_[r_[:, 0], np.full(len(r_), y_), r_[:, 1]])], True,
+                          (0, 220, 0) if last or j == 0 else (0, 120, 0), 3 if last else 1, cv2.LINE_AA)
+    ang = np.linspace(0, 2 * np.pi, 33)
+    for f in feats:
+        r = f['diameter_mm'] / 2
+        cv2.polylines(po, [pp(np.c_[f['xz'][0] - W / 2 + r * np.cos(ang), np.full(33, f['y']), f['xz'][1] - D / 2 + r * np.sin(ang)])], True, (0, 0, 255), 2, cv2.LINE_AA)
+    for c in cards:
+        cv2.polylines(po, [pp(np.array(c.pop('foot_line')))], False, (255, 0, 255), 3, cv2.LINE_AA)
+    cv2.imwrite(str(out / 'photo_overlay.jpg'), po, [cv2.IMWRITE_JPEG_QUALITY, 88])
+
+    rep = {'template': 'slab', 'size_mm': {'width': round(W, 1), 'depth': round(D, 1), 'height': round(top_y, 1)},
+           'depth_from_photo': top.depth_assumed, 'focal_px': round(top.focal), 'focal_source': top.focal_source,
+           'camera': top.camera_report(), 'reference_plane': plane, 'reference_y_mm': top.y_ref,
+           'outline_points': len(outline) if outline is not None else None, 'layers': layers,
+           'features': {g['name']: sum(f['group'] == g['name'] for f in feats) for g in cfg.get('features', [])},
+           'features_snapped': snapped, 'features_not_snapped': [f['group'] for f in feats if f['snap'] and 'snap_mm' not in f],
+           'feature_list': [{'group': f['group'], 'x_mm': round(float(f['xz'][0]), 2), 'z_mm': round(float(f['xz'][1]), 2),
+                             'moved_mm': f.get('snap_mm'), 'nearest_circle_mm': f.get('nearest_circle_mm')} for f in feats],
+           'cards': cards, 'bbox_mm': {'min': np.round(allp.min(0), 1).tolist(), 'max': np.round(allp.max(0), 1).tolist()},
+           'texture_bounds_mm': [round(float(v), 2) for v in b], 'triangles': glb.tris, 'bytes': size}
+    if top.circle_fit: rep['circle_fit'] = top.circle_fit
+    if top.mirrored: rep['corner_order_mirrored'] = True
+    return rep
 
 
 cfg_group = lambda cfg, name: next(g for g in cfg['features'] if g['name'] == name)
@@ -366,7 +733,10 @@ def cmd_build(a):
         raise SystemExit(f"unknown template {cfg['template']!r} (this version has only 'slab')")
     rep['config'] = str(cfg_path)
     (out / 'report.json').write_text(json.dumps(rep, indent=1, ensure_ascii=False))
-    print(json.dumps({k: v for k, v in rep.items() if k not in ('layers', 'config', 'feature_list')}, ensure_ascii=False))
+    short = {k: v for k, v in rep.items() if k not in ('layers', 'config', 'feature_list', 'bbox_mm', 'texture_bounds_mm')}
+    short['cards'] = len(rep['cards']); short['camera'] = {k: v for k, v in rep['camera'].items() if k != 'position_mm'}
+    if 'circle_fit' in short: short['circle_fit'] = {k: v for k, v in rep['circle_fit'].items() if k != 'corners'}
+    print(json.dumps(short, ensure_ascii=False))
     far = [f for f in rep.get('feature_list', []) if (f['moved_mm'] or 0) > 2.5]
     if far:
         print('moved more than 2.5 mm by the circle search (check top_overlay.jpg):', json.dumps(far))

@@ -19,7 +19,7 @@ iPhone で作品のまわりを撮り、写真・作品のマスク（案内つ�
 | 受信サーバー | `receiver/` | Python の標準ライブラリだけで動く Mac の受信サーバー。同じネットワーク（自宅の LAN・USB ケーブル・インターネット共有）からの接続だけを受け、`captures/sessions/` に保存する |
 | AI 向けの入力を作るツール | `tools/claude-pack/` | `memoria-pack`。受け取ったセッションから `captures/for_claude/<sessionId>/`（入口は `brief.md`）を作る。受信サーバーが受け取るたびに自動で動かす |
 
-ほかに、写真測量で 3D にしてみる実験用のツール `tools/reconstruct/` があります。また、平らな作品（貼り絵・紙に描いた絵）を写真 1 枚から GLB にするツール `tools/flat-art-glb/` があります（撮影アプリの流れとは別に、単独で動きます）。 上が平らな単純な立体（箱・板・操作盤など）を数枚の写真から GLB にするツール `tools/solid-glb/` もあります。
+ほかに、写真測量で 3D にしてみる実験用のツール `tools/reconstruct/` があります。また、平らな作品（貼り絵・紙に描いた絵）を写真 1 枚から GLB にするツール `tools/flat-art-glb/` があります（撮影アプリの流れとは別に、単独で動きます）。 層を積んだ形の単純な立体（箱・板・操作盤、紙皿の上に作った工作など）を数枚の写真から GLB にするツール `tools/solid-glb/` もあります。
 
 ## はじめかた
 
@@ -37,7 +37,7 @@ python3 receiver/memoria_receiver.py
 - AI 向けの入力の中身：[tools/claude-pack/README.md](tools/claude-pack/README.md)
 - 写真測量のツール：[tools/reconstruct/README.md](tools/reconstruct/README.md)
 - 平らな作品を GLB にするツール：[tools/flat-art-glb/README.md](tools/flat-art-glb/README.md)
-- 上が平らな単純な立体を GLB にするツール：[tools/solid-glb/README.md](tools/solid-glb/README.md)
+- 層を積んだ形の単純な立体を GLB にするツール：[tools/solid-glb/README.md](tools/solid-glb/README.md)
 
 ## 注意
 
